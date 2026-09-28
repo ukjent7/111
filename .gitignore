@@ -1,5 +1,6 @@
 /target
 /e2e-report.json
+/ui-smoke-report.json
 
 # 不上传 github（见 AGENTS.md）
 AGENTS.md

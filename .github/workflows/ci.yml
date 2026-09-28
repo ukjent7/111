@@ -22,8 +22,22 @@ jobs:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+      # the JSON-shape e2e can't see the page: drive the real UI in a real
+      # browser and fail on any uncaught script error, on every tab
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: 22
+      - name: UI smoke (real browser, every tab)
+        if: runner.os == 'Linux'
+        run: |
+          npm i -g playwright
+          npx playwright install --with-deps chromium
+          node tests/ui-smoke.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: e2e-report-${{ matrix.os }}
-          path: e2e-report.json
+          path: |
+            e2e-report.json
+            ui-smoke-report.json

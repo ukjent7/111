@@ -1,0 +1,69 @@
+// UI smoke: the gateway's real binary serving the real UI, driven in a real
+// browser. Any uncaught JS exception on any tab — like a payload field the
+// page iterates but the backend doesn't send — fails the run. Leaves
+// ui-smoke-report.json behind as the artifact.
+import { chromium } from 'playwright';
+import { spawn } from 'node:child_process';
+import net from 'node:net';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const bin = process.platform === 'win32' ? 'target/debug/magpie-gateway.exe' : 'target/debug/magpie-gateway';
+if (!fs.existsSync(bin)) {
+  console.error(`gateway binary missing at ${bin} — run cargo test first`);
+  process.exit(1);
+}
+
+const freePort = () =>
+  new Promise((resolve) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const port = s.address().port;
+      s.close(() => resolve(port));
+    });
+  });
+const connected = (port) =>
+  new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1');
+    s.on('connect', () => { s.end(); resolve(true); });
+    s.on('error', () => resolve(false));
+  });
+
+const port = await freePort();
+const config = path.join(os.tmpdir(), `magpie-ui-smoke-${process.pid}.json`);
+const gateway = spawn(bin, ['--listen', `127.0.0.1:${port}`, '--config', config, '--no-window'], { stdio: 'ignore' });
+try {
+  let up = false;
+  for (let i = 0; i < 150 && !up; i++) up = await connected(port);
+  if (!up) throw new Error('gateway never became ready');
+
+  const errors = [];
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  page.on('pageerror', (e) => errors.push(`uncaught: ${e.message}`));
+  // resource-load noise (a 404 for /api/icons, say) is the page working as
+  // designed; only real script errors count
+  page.on('console', (m) => {
+    if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(`console: ${m.text()}`);
+  });
+
+  await page.goto(`http://127.0.0.1:${port}/?shell=1`, { waitUntil: 'load' });
+  await page.waitForTimeout(1500);
+  const brand = await page.textContent('.brand span:last-child');
+  for (const tab of ['Providers', 'Gateway', 'Routing', 'Usage', 'Settings', 'Agents']) {
+    await page.click(`#nav button:has-text("${tab}")`, { timeout: 5000 }).catch((e) => errors.push(`click ${tab}: ${e.message}`));
+    await page.waitForTimeout(800);
+  }
+  await browser.close();
+
+  const report = { tabs: 6, errors, passed: errors.length === 0 && brand === 'magpie' };
+  fs.writeFileSync('ui-smoke-report.json', JSON.stringify(report, null, 2));
+  if (!report.passed) {
+    console.error(`UI smoke failed:\n${errors.join('\n')}`);
+    process.exit(1);
+  }
+  console.log('UI smoke passed: six tabs, no uncaught errors');
+} finally {
+  gateway.kill();
+}
