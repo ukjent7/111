@@ -112,7 +112,8 @@ fn host_scenario(gateway_addr: SocketAddr) -> Vec<Check> {
     let status = buf.lines().next().unwrap_or_default().to_owned();
     vec![check(
         "a rebound Host is refused before anything else",
-        status.contains(" 403 ")
+        status
+            .contains(" 403 ")
             .then(|| status.clone())
             .ok_or_else(|| format!("answered {status:?}")),
     )]

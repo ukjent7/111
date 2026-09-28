@@ -475,7 +475,11 @@ pub async fn delete(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Res
 
 pub async fn reveal_key(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
     let cfg = app.config.lock().await;
-    match cfg.providers.iter().find(|p| p.id == body["id"].as_str().unwrap_or("")) {
+    match cfg
+        .providers
+        .iter()
+        .find(|p| p.id == body["id"].as_str().unwrap_or(""))
+    {
         Some(p) => Json(json!({ "key": p.key })).into_response(),
         None => err(StatusCode::NOT_FOUND, "no such provider"),
     }
@@ -561,11 +565,7 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
         return err(StatusCode::BAD_GATEWAY, "the vendor listed no models");
     }
     let mut cfg = app.config.lock().await;
-    if let Some(p) = cfg
-        .providers
-        .iter_mut()
-        .find(|p| p.id == id)
-    {
+    if let Some(p) = cfg.providers.iter_mut().find(|p| p.id == id) {
         p.models = merge_models(&p.models, &ids);
     }
     if let Err(res) = persisted(&app, &cfg) {
@@ -613,8 +613,7 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
                 None => out
                     .push(json!({ "protocol": name, "ok": false, "error": "no URL for this API" })),
                 Some(base) => {
-                    let mut r =
-                        tiny_request(&app.client, api, base, &p.key, &fallback).await;
+                    let mut r = tiny_request(&app.client, api, base, &p.key, &fallback).await;
                     r["protocol"] = json!(name);
                     out.push(r);
                 }
