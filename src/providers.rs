@@ -348,14 +348,13 @@ fn err(status: StatusCode, msg: &str) -> Response {
 }
 
 /// The config-writing endpoints' shared failure path: persist breaking is a
-/// 500 with the reason; success leaves the answering to the caller.
-fn persisted(app: &App, cfg: &ConfigState) -> Result<(), Response> {
-    persist(&app.config_path, cfg).map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not save the config: {e}"),
-        )
-    })
+/// 500 with the reason; `None` leaves the answering to the caller.
+fn persisted(app: &App, cfg: &ConfigState) -> Option<Response> {
+    let e = persist(&app.config_path, cfg).err()?;
+    Some(err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("could not save the config: {e}"),
+    ))
 }
 
 /// The editor's save. It arrives with `from` when renaming; a partial save
@@ -455,7 +454,7 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
         Some(i) => cfg.providers[i] = rec,
         None => cfg.providers.push(rec),
     }
-    if let Err(res) = persisted(&app, &cfg) {
+    if let Some(res) = persisted(&app, &cfg) {
         return res;
     }
     Json(payload(&app, &cfg)).into_response()
@@ -467,7 +466,7 @@ pub async fn delete(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Res
     };
     let mut cfg = app.config.lock().await;
     cfg.providers.retain(|p| p.id != id);
-    if let Err(res) = persisted(&app, &cfg) {
+    if let Some(res) = persisted(&app, &cfg) {
         return res;
     }
     Json(payload(&app, &cfg)).into_response()
@@ -568,7 +567,7 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
     if let Some(p) = cfg.providers.iter_mut().find(|p| p.id == id) {
         p.models = merge_models(&p.models, &ids);
     }
-    if let Err(res) = persisted(&app, &cfg) {
+    if let Some(res) = persisted(&app, &cfg) {
         return res;
     }
     (StatusCode::OK, Json(json!({ "count": ids.len() }))).into_response()
