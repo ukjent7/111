@@ -45,6 +45,7 @@ try {
   for (let i = 0; i < 150 && !up; i++) {
     if (exit) break; // died on its feet — report why instead of timing out
     up = await connected(port);
+    if (!up) await new Promise((r) => setTimeout(r, 100)); // a 15s window, like the rust e2e's
   }
   if (!up) {
     // everything the runner knows about the process, in one glance
