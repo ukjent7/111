@@ -10,9 +10,10 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 
-use crate::{App, ConfigState, Logo, persist};
+use crate::{App, ConfigState, Logo, persist, shell_state};
 
 // ---------- the payload the UI renders ----------
 
@@ -27,7 +28,7 @@ pub async fn sync(State(app): State<Arc<App>>) -> Response {
     match fetch_catalog(&app.client).await {
         Ok(v) => {
             *app.catalog.lock().unwrap() = v;
-            Json(json!({ "agents": [], "profiles": [], "settings": {} })).into_response()
+            shell_state()
         }
         Err(e) => err(
             StatusCode::BAD_GATEWAY,
@@ -87,14 +88,10 @@ async fn fetch_logo(client: &reqwest::Client, id: &str) -> Logo {
 pub fn payload(app: &App, cfg: &ConfigState) -> Value {
     let catalog = app.catalog.lock().unwrap();
     let providers: Vec<Value> = cfg.providers.iter().map(|p| enrich(p, &catalog)).collect();
-    let models: usize = providers
+    let models: usize = cfg
+        .providers
         .iter()
-        .map(|p| {
-            p["models"]
-                .as_array()
-                .map(|m| m.iter().filter(|m| m["on"] == json!(true)).count())
-                .unwrap_or(0)
-        })
+        .map(|p| p.models.iter().filter(|m| m.on).count())
         .sum();
     let calls: Vec<Value> = app
         .gateway
@@ -122,25 +119,19 @@ pub fn payload(app: &App, cfg: &ConfigState) -> Value {
 
 /// A stored provider, plus the derived bits the list row reads: display
 /// names come from the models.dev catalog when it knows the model.
-fn enrich(p: &Value, catalog: &Value) -> Value {
-    let mut out = p.clone();
-    let key = p["key"].as_str().unwrap_or("");
-    out["key"] = json!({ "set": !key.is_empty(), "masked": mask(key) });
-    let host = ["chat", "responses", "anthropic"]
-        .iter()
-        .find_map(|f| p[f].as_str())
-        .unwrap_or("");
-    out["host"] = json!(host_of(host));
+fn enrich(p: &Provider, catalog: &Value) -> Value {
+    let mut out = serde_json::to_value(p).unwrap_or_default();
+    let host = host_of(p.base_url());
     let local = matches!(
-        out["host"].as_str().unwrap_or(""),
+        host.as_str(),
         "127.0.0.1" | "localhost" | "[::1]" | "0.0.0.0"
     );
-    out["ready"] = json!(key.is_empty() && local);
+    out["key"] = json!({ "set": !p.key.is_empty(), "masked": mask(&p.key) });
+    out["host"] = json!(host);
+    out["ready"] = json!(p.key.is_empty() && local);
     out["agents"] = json!([]);
-    out["models"] = normalize_models(&p["models"]);
-    let names = p["catalog"]
-        .as_str()
-        .and_then(|id| catalog.get(id))
+    let names = catalog
+        .get(p.catalog.as_str())
         .and_then(|c| c.get("models"))
         .and_then(Value::as_object);
     if let (Some(names), Some(models)) = (names, out["models"].as_array_mut()) {
@@ -230,118 +221,262 @@ fn preset_from(p: &Value) -> Option<Value> {
     }))
 }
 
+// ---------- the config's shape ----------
+
+/// One row in the Providers tab, as stored in config.json. The fields the
+/// gateway reads are typed; everything else the UI attaches (presets,
+/// balance URLs, fallbacks, contexts, whatever it grows next) rides along in
+/// `extra` and survives a save untouched.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Provider {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub chat: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub responses: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub anthropic: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub catalog: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
+    #[serde(
+        rename = "modelsURL",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub models_url: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unlisted: bool,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub headers: Map<String, Value>,
+    /// always serialized, even empty: the list row reads it unguarded
+    #[serde(default, deserialize_with = "de_models")]
+    pub models: Vec<Model>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// A model as the UI sees it: an id, its on flag, and the display name a
+/// models.dev refresh may have given it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Model {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub on: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// Models may be stored as bare id strings (a hand-edited config).
+fn de_models<'de, D>(d: D) -> Result<Vec<Model>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<Value> = Deserialize::deserialize(d)?;
+    raw.into_iter()
+        .map(|v| match v {
+            Value::String(id) => Ok(Model {
+                id,
+                on: true,
+                name: None,
+                extra: Map::new(),
+            }),
+            other => serde_json::from_value(other).map_err(serde::de::Error::custom),
+        })
+        .collect()
+}
+
+/// The protocol a request or a provider speaks.
+#[derive(Clone, Copy, PartialEq)]
+enum Api {
+    Chat,
+    Responses,
+    Anthropic,
+}
+
+impl Provider {
+    fn url(&self, api: Api) -> &str {
+        match api {
+            Api::Chat => &self.chat,
+            Api::Responses => &self.responses,
+            Api::Anthropic => &self.anthropic,
+        }
+    }
+
+    /// The URL an API is actually reachable on.
+    fn url_set(&self, api: Api) -> Option<&str> {
+        Some(self.url(api)).filter(|s| !s.is_empty())
+    }
+
+    /// The first URL the provider declares, in chat → responses → anthropic
+    /// order; the host shown in the list row is picked from it.
+    fn base_url(&self) -> &str {
+        [Api::Chat, Api::Responses, Api::Anthropic]
+            .into_iter()
+            .find_map(|api| self.url_set(api))
+            .unwrap_or("")
+    }
+}
+
+fn api_proto(p: &Provider) -> Api {
+    match p.api.as_str() {
+        "responses" => Api::Responses,
+        "anthropic" => Api::Anthropic,
+        _ if !p.anthropic.is_empty() && p.chat.is_empty() => Api::Anthropic,
+        _ => Api::Chat,
+    }
+}
+
 // ---------- the editor's endpoints ----------
 
 fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
+/// The config-writing endpoints' shared failure path: persist breaking is a
+/// 500 with the reason; success leaves the answering to the caller.
+fn persisted(app: &App, cfg: &ConfigState) -> Result<(), Response> {
+    persist(&app.config_path, cfg).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("could not save the config: {e}"),
+        )
+    })
+}
+
+/// The editor's save. It arrives with `from` when renaming; a partial save
+/// only touches the fields it carries, so a models toggle keeps the key.
+#[derive(Deserialize)]
+struct SaveRequest {
+    id: String,
+    from: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    api: Option<String>,
+    #[serde(default)]
+    chat: Option<String>,
+    #[serde(default)]
+    responses: Option<String>,
+    #[serde(default)]
+    anthropic: Option<String>,
+    #[serde(default)]
+    catalog: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(rename = "modelsURL", default)]
+    models_url: Option<String>,
+    #[serde(default)]
+    unlisted: Option<bool>,
+    #[serde(default)]
+    headers: Option<Map<String, Value>>,
+    #[serde(default)]
+    models: Option<Vec<String>>,
+    #[serde(flatten)]
+    rest: Map<String, Value>,
+}
+
 pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
-    let Some(id) = body["id"]
-        .as_str()
-        .map(str::to_owned)
-        .filter(|s| !s.is_empty())
-    else {
-        return err(StatusCode::BAD_REQUEST, "the provider needs an id");
+    let req = match serde_json::from_value::<SaveRequest>(body) {
+        Ok(req) if !req.id.is_empty() => req,
+        _ => return err(StatusCode::BAD_REQUEST, "the provider needs an id"),
     };
     let mut cfg = app.config.lock().await;
-    // an edit arrives with `from` (its id before a rename); a partial save
-    // only touches the fields it carries, so a models toggle keeps the key
     let pos = cfg
         .providers
         .iter()
-        .position(|p| p["id"].as_str() == Some(body["from"].as_str().unwrap_or(&id)));
+        .position(|p| p.id == req.from.clone().unwrap_or_else(|| req.id.clone()));
     let mut rec = pos
         .and_then(|i| cfg.providers.get(i).cloned())
-        .unwrap_or_else(|| json!({}));
-    rec["id"] = json!(id);
-    if let Some(v) = body["name"].as_str() {
-        rec["name"] = json!(v);
-    }
-    if rec["name"].as_str().unwrap_or("").is_empty() {
-        rec["name"] = rec["id"].clone();
-    }
-    for f in [
-        "preset",
-        "api",
-        "chat",
-        "responses",
-        "anthropic",
-        "catalog",
-        "icon",
-        "balanceURL",
-        "balancePath",
-        "modelsURL",
-    ] {
-        if let Some(v) = body[f].as_str() {
-            rec[f] = json!(v);
-        }
-    }
-    if rec["icon"].as_str().unwrap_or("").is_empty() {
-        rec["icon"] = json!("generic");
-    }
-    if let Some(v) = body["key"].as_str() {
-        rec["key"] = json!(v);
-    }
-    if let Some(v) = body["headers"].as_object() {
-        rec["headers"] = json!(v);
-    }
-    if let Some(v) = body["unlisted"].as_bool() {
-        rec["unlisted"] = json!(v);
-    }
-    if let Some(v) = body["fallback"].as_array() {
-        rec["fallback"] = json!(v);
-    }
-    if let Some(v) = body["contexts"].as_object() {
-        rec["contexts"] = json!(v);
-    }
-    let chosen: Vec<String> = body["models"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
-        })
         .unwrap_or_default();
-    if body["models"].is_array() {
-        rec["models"] = merge_models(rec["models"].as_array(), &chosen);
+    rec.id = req.id.clone();
+    if let Some(v) = req.name {
+        rec.name = v;
+    }
+    if rec.name.is_empty() {
+        rec.name = rec.id.clone();
+    }
+    if let Some(v) = req.key {
+        rec.key = v;
+    }
+    if let Some(v) = req.api {
+        rec.api = v;
+    }
+    if let Some(v) = req.chat {
+        rec.chat = v;
+    }
+    if let Some(v) = req.responses {
+        rec.responses = v;
+    }
+    if let Some(v) = req.anthropic {
+        rec.anthropic = v;
+    }
+    if let Some(v) = req.catalog {
+        rec.catalog = v;
+    }
+    if let Some(v) = req.icon {
+        rec.icon = v;
+    }
+    if rec.icon.is_empty() {
+        rec.icon = "generic".to_owned();
+    }
+    if let Some(v) = req.models_url {
+        rec.models_url = v;
+    }
+    if let Some(v) = req.unlisted {
+        rec.unlisted = v;
+    }
+    if let Some(v) = req.headers {
+        rec.headers = v;
+    }
+    // presets, balance URLs, fallbacks, contexts — anything else the UI
+    // carries lands in `extra`
+    rec.extra.extend(req.rest);
+    if let Some(on) = req.models {
+        rec.models = merge_models(&rec.models, &on);
     }
     match pos {
         Some(i) => cfg.providers[i] = rec,
         None => cfg.providers.push(rec),
     }
-    if let Err(e) = persist(&app.config_path, &cfg) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not save the config: {e}"),
-        );
+    if let Err(res) = persisted(&app, &cfg) {
+        return res;
     }
     Json(payload(&app, &cfg)).into_response()
 }
 
 pub async fn delete(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
-    let Some(id) = body["id"].as_str() else {
+    let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
         return err(StatusCode::BAD_REQUEST, "which provider?");
     };
     let mut cfg = app.config.lock().await;
-    cfg.providers.retain(|p| p["id"].as_str() != Some(id));
-    if let Err(e) = persist(&app.config_path, &cfg) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not save the config: {e}"),
-        );
+    cfg.providers.retain(|p| p.id != id);
+    if let Err(res) = persisted(&app, &cfg) {
+        return res;
     }
     Json(payload(&app, &cfg)).into_response()
 }
 
 pub async fn reveal_key(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
     let cfg = app.config.lock().await;
-    match cfg
-        .providers
-        .iter()
-        .find(|p| p["id"].as_str() == Some(body["id"].as_str().unwrap_or("")))
-    {
-        Some(p) => Json(json!({ "key": p["key"].as_str().unwrap_or("") })).into_response(),
+    match cfg.providers.iter().find(|p| p.id == body["id"].as_str().unwrap_or("")) {
+        Some(p) => Json(json!({ "key": p.key })).into_response(),
         None => err(StatusCode::NOT_FOUND, "no such provider"),
     }
 }
@@ -353,26 +488,19 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
     };
     let (base, key, anthropic) = {
         let cfg = app.config.lock().await;
-        let Some(p) = cfg.providers.iter().find(|p| p["id"].as_str() == Some(&id)) else {
+        let Some(p) = cfg.providers.iter().find(|p| p.id == id) else {
             return err(StatusCode::NOT_FOUND, "no such provider");
         };
-        let base = ["modelsURL", "chat", "responses"]
-            .iter()
-            .find_map(|f| p[f].as_str())
-            .filter(|s| !s.is_empty())
+        let base = [p.models_url.as_str(), p.chat.as_str(), p.responses.as_str()]
+            .into_iter()
+            .find(|s| !s.is_empty())
             .map(|s| format!("{}/models", s.trim_end_matches('/')))
             .or_else(|| {
-                p["anthropic"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| format!("{}/v1/models", s.trim_end_matches('/')))
+                (!p.anthropic.is_empty())
+                    .then(|| format!("{}/v1/models", p.anthropic.trim_end_matches('/')))
             })
             .unwrap_or_default();
-        (
-            base,
-            p["key"].as_str().unwrap_or("").to_owned(),
-            p["anthropic"].as_str().is_some_and(|s| !s.is_empty()),
-        )
+        (base, p.key.clone(), !p.anthropic.is_empty())
     };
     if base.is_empty() {
         return err(
@@ -432,21 +560,16 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
     if ids.is_empty() {
         return err(StatusCode::BAD_GATEWAY, "the vendor listed no models");
     }
+    let mut cfg = app.config.lock().await;
+    if let Some(p) = cfg
+        .providers
+        .iter_mut()
+        .find(|p| p.id == id)
     {
-        let mut cfg = app.config.lock().await;
-        if let Some(p) = cfg
-            .providers
-            .iter_mut()
-            .find(|p| p["id"].as_str() == Some(&id))
-        {
-            p["models"] = merge_models(p["models"].as_array(), &ids);
-        }
-        if let Err(e) = persist(&app.config_path, &cfg) {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("could not save the config: {e}"),
-            );
-        }
+        p.models = merge_models(&p.models, &ids);
+    }
+    if let Err(res) = persisted(&app, &cfg) {
+        return res;
     }
     (StatusCode::OK, Json(json!({ "count": ids.len() }))).into_response()
 }
@@ -460,10 +583,7 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     };
     let provider = {
         let cfg = app.config.lock().await;
-        cfg.providers
-            .iter()
-            .find(|p| p["id"].as_str() == Some(&id))
-            .cloned()
+        cfg.providers.iter().find(|p| p.id == id).cloned()
     };
     let Some(p) = provider else {
         return err(StatusCode::NOT_FOUND, "no such provider");
@@ -477,30 +597,24 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
         })
         .unwrap_or_default();
     let results: Vec<Value> = if per_model.is_empty() {
-        let fallback = p["models"]
-            .as_array()
-            .and_then(|m| m.iter().find(|m| m["on"] == json!(true)))
-            .and_then(|m| m["id"].as_str())
-            .unwrap_or("test")
-            .to_owned();
+        let fallback = p
+            .models
+            .iter()
+            .find(|m| m.on)
+            .map(|m| m.id.clone())
+            .unwrap_or_else(|| "test".to_owned());
         let mut out = Vec::new();
-        for (name, field, proto) in [
-            ("chat", "chat", Proto::Chat),
-            ("responses", "responses", Proto::Responses),
-            ("anthropic", "anthropic", Proto::Anthropic),
+        for (name, api) in [
+            ("chat", Api::Chat),
+            ("responses", Api::Responses),
+            ("anthropic", Api::Anthropic),
         ] {
-            match p[field].as_str().filter(|s| !s.is_empty()) {
+            match p.url_set(api) {
                 None => out
                     .push(json!({ "protocol": name, "ok": false, "error": "no URL for this API" })),
                 Some(base) => {
-                    let mut r = tiny_request(
-                        &app.client,
-                        proto,
-                        base,
-                        p["key"].as_str().unwrap_or(""),
-                        &fallback,
-                    )
-                    .await;
+                    let mut r =
+                        tiny_request(&app.client, api, base, &p.key, &fallback).await;
                     r["protocol"] = json!(name);
                     out.push(r);
                 }
@@ -509,72 +623,39 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
         out
     } else {
         let proto = api_proto(&p);
-        let Some(base) = url_for(&p, proto).filter(|s| !s.is_empty()) else {
+        let Some(base) = p.url_set(proto) else {
             return err(
                 StatusCode::BAD_REQUEST,
                 "this provider has no URL for its own API",
             );
         };
-        let key = p["key"].as_str().unwrap_or("");
         let mut out = Vec::new();
         for model in &per_model {
-            out.push(tiny_request(&app.client, proto, base, key, model).await);
+            out.push(tiny_request(&app.client, proto, base, &p.key, model).await);
         }
         out
     };
     (StatusCode::OK, Json(json!({ "results": results }))).into_response()
 }
 
-#[derive(Clone, Copy)]
-enum Proto {
-    Chat,
-    Responses,
-    Anthropic,
-}
-
-fn api_proto(p: &Value) -> Proto {
-    match p["api"].as_str() {
-        Some("responses") => Proto::Responses,
-        Some("anthropic") => Proto::Anthropic,
-        _ => {
-            if p["anthropic"].as_str().is_some_and(|s| !s.is_empty())
-                && p["chat"].as_str().is_none_or(|s| s.is_empty())
-            {
-                Proto::Anthropic
-            } else {
-                Proto::Chat
-            }
-        }
-    }
-}
-
-fn url_for(p: &Value, proto: Proto) -> Option<&str> {
-    let field = match proto {
-        Proto::Chat => "chat",
-        Proto::Responses => "responses",
-        Proto::Anthropic => "anthropic",
-    };
-    p[field].as_str().filter(|s| !s.is_empty())
-}
-
 async fn tiny_request(
     client: &reqwest::Client,
-    proto: Proto,
+    proto: Api,
     base: &str,
     key: &str,
     model: &str,
 ) -> Value {
     let t0 = Instant::now();
     let url = match proto {
-        Proto::Anthropic => format!("{}/v1/messages", base.trim_end_matches('/')),
-        Proto::Chat => format!("{}/chat/completions", base.trim_end_matches('/')),
-        Proto::Responses => format!("{}/responses", base.trim_end_matches('/')),
+        Api::Anthropic => format!("{}/v1/messages", base.trim_end_matches('/')),
+        Api::Chat => format!("{}/chat/completions", base.trim_end_matches('/')),
+        Api::Responses => format!("{}/responses", base.trim_end_matches('/')),
     };
     let body = match proto {
-        Proto::Anthropic | Proto::Chat => {
+        Api::Anthropic | Api::Chat => {
             json!({ "model": model, "max_tokens": 1, "messages": [{ "role": "user", "content": "hi" }] }).to_string()
         }
-        Proto::Responses => json!({ "model": model, "input": "hi", "max_output_tokens": 1 }).to_string(),
+        Api::Responses => json!({ "model": model, "input": "hi", "max_output_tokens": 1 }).to_string(),
     };
     let mut req = client
         .post(&url)
@@ -582,7 +663,7 @@ async fn tiny_request(
         .body(body);
     if !key.is_empty() {
         req = match proto {
-            Proto::Anthropic => req
+            Api::Anthropic => req
                 .header("x-api-key", key)
                 .header("anthropic-version", "2023-06-01"),
             _ => req.header(header::AUTHORIZATION, format!("Bearer {key}")),
@@ -602,42 +683,25 @@ async fn tiny_request(
     }
 }
 
-/// Models may be stored as bare id strings (a hand-edited config); make them
-/// objects without touching their on flags.
-fn normalize_models(models: &Value) -> Value {
-    match models.as_array() {
-        Some(arr) => Value::Array(
-            arr.iter()
-                .map(|m| {
-                    if let Some(id) = m.as_str() {
-                        json!({ "id": id, "on": true })
-                    } else {
-                        m.clone()
-                    }
-                })
-                .collect(),
-        ),
-        None => json!([]),
-    }
-}
-
 /// All picked models on, kept ones off, new ones appended; display names
 /// already given survive a refresh.
-fn merge_models(existing: Option<&Vec<Value>>, on: &[String]) -> Value {
-    let mut out: Vec<Value> = existing.cloned().unwrap_or_default();
-    for m in out.iter_mut() {
-        m["on"] = json!(false);
+fn merge_models(existing: &[Model], on: &[String]) -> Vec<Model> {
+    let mut out = existing.to_vec();
+    for m in &mut out {
+        m.on = false;
     }
     for id in on {
-        match out
-            .iter_mut()
-            .find(|m| m["id"].as_str() == Some(id.as_str()))
-        {
-            Some(m) => m["on"] = json!(true),
-            None => out.push(json!({ "id": id, "on": true })),
+        match out.iter_mut().find(|m| &m.id == id) {
+            Some(m) => m.on = true,
+            None => out.push(Model {
+                id: id.clone(),
+                on: true,
+                name: None,
+                extra: Map::new(),
+            }),
         }
     }
-    json!(out)
+    out
 }
 
 // ---------- where a pass-through request goes ----------
@@ -645,7 +709,7 @@ fn merge_models(existing: Option<&Vec<Value>>, on: &[String]) -> Value {
 pub struct Target {
     pub url: String,
     pub key: String,
-    pub extra: Value,
+    pub headers: Map<String, Value>,
     pub anthropic: bool,
 }
 
@@ -657,32 +721,35 @@ pub fn route_for(cfg: &ConfigState, path_and_query: &str) -> Option<Target> {
         Some((p, q)) => (p, Some(q)),
         None => (path_and_query, None),
     };
-    let (field, sub) = if path.starts_with("/v1/messages") || path.starts_with("/v1/complete") {
-        ("anthropic", path.to_owned())
+    let (api, sub) = if path.starts_with("/v1/messages") || path.starts_with("/v1/complete") {
+        (Api::Anthropic, path.to_owned())
     } else if path.contains("/responses") {
         (
-            "responses",
+            Api::Responses,
             path.strip_prefix("/v1").unwrap_or(path).to_owned(),
         )
     } else {
-        ("chat", path.strip_prefix("/v1").unwrap_or(path).to_owned())
+        (
+            Api::Chat,
+            path.strip_prefix("/v1").unwrap_or(path).to_owned(),
+        )
     };
     let sub = if sub.is_empty() { "/".to_owned() } else { sub };
-    for p in &cfg.providers {
-        let Some(base) = p[field].as_str().filter(|s| !s.is_empty()) else {
-            continue;
-        };
-        let mut url = format!("{}{}", base.trim_end_matches('/'), sub);
+    cfg.providers.iter().find_map(|p| {
+        let base = p.url(api).trim_end_matches('/');
+        if base.is_empty() {
+            return None;
+        }
+        let mut url = format!("{base}{sub}");
         if let Some(q) = query {
             url.push('?');
             url.push_str(q);
         }
-        return Some(Target {
+        Some(Target {
             url,
-            key: p["key"].as_str().unwrap_or("").to_owned(),
-            extra: p["headers"].clone(),
-            anthropic: field == "anthropic",
-        });
-    }
-    None
+            key: p.key.clone(),
+            headers: p.headers.clone(),
+            anthropic: api == Api::Anthropic,
+        })
+    })
 }

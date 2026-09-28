@@ -11,11 +11,13 @@ use anyhow::{Context, Result, bail};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use include_dir::{Dir, include_dir};
 use reqwest::redirect::Policy;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
@@ -31,10 +33,14 @@ pub struct Gateway {
     pub calls: Mutex<VecDeque<Value>>,
 }
 
+#[derive(Default, Serialize, Deserialize)]
 pub struct ConfigState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub upstream: String,
-    pub providers: Vec<Value>,
+    #[serde(default)]
+    pub providers: Vec<providers::Provider>,
 }
 
 /// a vendor logo's bytes and content type, or its absence
@@ -144,6 +150,7 @@ fn main() -> Result<()> {
         .route("/api/provider/test", post(providers::test))
         .fallback(entry)
         .layer(DefaultBodyLimit::disable())
+        .layer(middleware::from_fn(check_host))
         .with_state(app.clone());
 
     // the gateway serves from background threads; the desktop window owns the
@@ -221,7 +228,7 @@ async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
     {
         return ([("content-type", "image/svg+xml")], icon.contents()).into_response();
     }
-    if name == "api" || name.starts_with("api/") || name == "wails" || name.starts_with("wails/") {
+    if name == "api" || name.starts_with("api/") {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "reserved by the shell" })),
@@ -229,6 +236,35 @@ async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
             .into_response();
     }
     proxy(State(app), req).await
+}
+
+/// DNS rebinding would let a web page read the API — and the key behind
+/// `/api/provider/key` — as if it were this machine: the browser's Host must
+/// name localhost or be a bare IP (a hostname can't be a rebinding target if
+/// the page never had one to rebind).
+async fn check_host(req: Request, next: Next) -> Response {
+    let local = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(host_name)
+        .is_some_and(|name| name == "localhost" || name.parse::<std::net::IpAddr>().is_ok());
+    if local {
+        next.run(req).await
+    } else {
+        StatusCode::FORBIDDEN.into_response()
+    }
+}
+
+/// The Host header's name, without port and IPv6 brackets.
+fn host_name(host: &str) -> String {
+    reqwest::Url::parse(&format!("http://{host}"))
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned()
 }
 
 /// Whatever arrives goes out unchanged: same method, path, query, headers and
@@ -285,14 +321,12 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
                     parts.headers.insert(header::AUTHORIZATION, bearer);
                 }
             }
-            if let Some(extra) = t.extra.as_object() {
-                for (name, value) in extra {
-                    if let (Ok(name), Ok(value)) = (
-                        HeaderName::try_from(name.as_str()),
-                        HeaderValue::try_from(value.as_str().unwrap_or_default()),
-                    ) {
-                        parts.headers.insert(name, value);
-                    }
+            for (name, value) in &t.headers {
+                if let (Ok(name), Ok(value)) = (
+                    HeaderName::try_from(name.as_str()),
+                    HeaderValue::try_from(value.as_str().unwrap_or_default()),
+                ) {
+                    parts.headers.insert(name, value);
                 }
             }
             t.url
@@ -362,8 +396,13 @@ fn record(
     }
 }
 
+/// The shell's boot answer: placeholders the page fills from the other tabs.
+pub fn shell_state() -> Response {
+    Json(json!({ "agents": [], "profiles": [], "settings": {} })).into_response()
+}
+
 async fn api_state() -> impl IntoResponse {
-    Json(json!({ "agents": [], "profiles": [], "settings": {} }))
+    shell_state()
 }
 
 async fn api_trace(State(app): State<Arc<App>>, req: Request) -> impl IntoResponse {
@@ -440,37 +479,40 @@ fn config_path(flag: Option<&str>) -> Result<PathBuf> {
 }
 
 fn load_config(path: &Path) -> ConfigState {
-    let saved = std::fs::read(path)
+    // a hand-edited or half-written file falls back to a fresh config, same
+    // as a missing one
+    std::fs::read(path)
         .ok()
-        .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap_or_default());
-    let field = |key: &str| {
-        saved
-            .as_ref()
-            .and_then(|v| v.get(key))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-    };
-    ConfigState {
-        listen: field("listen"),
-        upstream: field("upstream").unwrap_or_default(),
-        providers: saved
-            .as_ref()
-            .and_then(|v| v.get("providers"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-    }
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 pub fn persist(path: &Path, cfg: &ConfigState) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let body = json!({
-        "listen": cfg.listen,
-        "upstream": if cfg.upstream.is_empty() { Value::Null } else { json!(cfg.upstream) },
-        "providers": cfg.providers,
-    });
-    std::fs::write(path, serde_json::to_string_pretty(&body)?)?;
+    let body = serde_json::to_string_pretty(cfg)?;
+    // the file carries API keys: write it out of line and rename, so a crash
+    // mid-write can't truncate the old one, and keep it to the owner
+    let tmp = path.with_extension("tmp");
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::create(&tmp)?;
+    {
+        use std::io::Write;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+    }
+    drop(file);
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }

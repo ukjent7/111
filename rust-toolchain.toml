@@ -1,2 +1,6 @@
 [toolchain]
 channel = "1.98.1"
+profile = "minimal"
+# the single source of truth: `rustup toolchain install` (what the CI setup
+# action runs) reads this file, components included
+components = ["clippy", "rustfmt"]

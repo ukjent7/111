@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # tao, wry and reqwest are 0.x, where a caret requirement can't cross a
+  # minor — Dependabot still moves them, and the grouped PR proves a month's
+  # worth of releases work together before it lands (its PRs run CI, unlike
+  # anything a GITHUB_TOKEN opens)
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        applies-to: version-updates
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns:
+          - "*"

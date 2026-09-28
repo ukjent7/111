@@ -15,8 +15,9 @@ if (!web && /^Mac/.test(navigator.platform)) document.body.classList.add("mac");
 if (!web && /^Linux/.test(navigator.platform)) document.body.classList.add("linux");
 // The window is dragged by its header, and only where the header says so
 // (--wails-draggable), so the tabs and buttons in it stay plain clicks.
-// Outside the app — a browser on the gateway's page — there is no runtime.
-const winRuntime = mode === "window" ? import("/wails/runtime.js").catch(() => null) : Promise.resolve(null);
+// No window runtime exists here (the desktop shell is the gateway's own
+// webview): the in-page close button is a no-op, the OS window closes for real.
+const winRuntime = Promise.resolve(null);
 if (params.get("theme")) document.documentElement.dataset.theme = params.get("theme");
 // the saved language and theme from boot.js, so the first paint is in them
 if (window.bootPrefs) {

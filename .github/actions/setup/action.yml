@@ -1,0 +1,41 @@
+name: Set up Rust
+description: >-
+  The Linux GUI deps, the toolchain pinned in rust-toolchain.toml (its
+  components come with it), a Cargo.lock for the --locked builds, and the
+  shared cargo cache.
+inputs:
+  compile:
+    description: whether the caller compiles; format-only jobs skip the GUI deps and the cache
+    type: string
+    default: "true"
+  shared-key:
+    description: rust-cache's shared key, separating artifact sets that would otherwise evict each other
+    type: string
+    required: false
+  cache-bin:
+    description: rust-cache's cache-bin; disable where nothing reinstalls binaries
+    type: string
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install Linux GUI build deps
+      if: inputs.compile == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+    - name: Install the pinned toolchain
+      shell: bash
+      run: rustup toolchain install
+    # the machine that writes the code has no cargo, so the lockfile is born
+    # here: fmt.yml commits it, and every build after that runs --locked
+    - name: Generate Cargo.lock when it is missing
+      shell: bash
+      run: "[ -f Cargo.lock ] || cargo generate-lockfile"
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      if: inputs.compile == 'true'
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        # main owns the cache: pull requests read it but don't spend the 10 GB
+        # quota on entries only they will ever hit
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+        cache-bin: ${{ inputs.cache-bin }}

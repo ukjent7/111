@@ -4,24 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  # a newer push supersedes an older run on the same ref; fmt.yml's own
-  # commits land on main, and a full 3-platform matrix each time is waste
-  cancel-in-progress: true
-
-env:
-  # CI never needs a full DWARF dump, only backtraces that name a file and a
-  # line. Dropping the rest makes every compile faster and shrinks target/
-  # enough to cut the cache upload, which is the slowest part of the Windows
-  # leg. Only the dev profile (and `test`, which inherits it) is affected —
-  # the release profile has debug info off already, so shipped binaries are
-  # byte-for-byte unaffected.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # a newer push cancels an older run on a pull request; on main every commit
+  # keeps its slot — canceling by ref would leave some pushes with no result
+  # at all, and fmt.yml's dispatch and the release call share a push's sha
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # clippy and `cargo test` produce different artifacts, so running both on
@@ -33,23 +27,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Install Linux GUI build deps
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
-      - uses: dtolnay/rust-toolchain@1.98.1
-        with:
-          components: clippy, rustfmt
-      # its own cache slot: clippy's artifacts would otherwise evict the
-      # test build's on every run
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup
         with:
           shared-key: lint
+      # on main, fmt.yml is what keeps the sources formatted — and the commit
+      # it pushes can't trigger this workflow, so the check stays with
+      # pull requests
       - name: cargo fmt --check
-        run: cargo fmt --check
-      - name: cargo clippy --all-targets -- -D warnings
-        run: cargo clippy --all-targets -- -D warnings
+        if: github.event_name == 'pull_request'
+        run: cargo fmt --check --locked
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked
 
   e2e:
     needs: lint
@@ -60,33 +51,28 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Install Linux GUI build deps
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup
         with:
           shared-key: e2e-${{ matrix.os }}
           # rust-cache's bin caching is known to misbehave on Windows
           # (Swatinem/rust-cache#341), and nothing here reinstalls the binary
           cache-bin: "false"
-      - run: cargo test
+      - run: cargo test --locked
       # the JSON-shape e2e can't see the page: drive the real UI in a real
       # browser and fail on any uncaught script error, on every tab
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         if: runner.os == 'Linux'
         with:
           node-version: 22
       - name: UI smoke (real browser, every tab)
         if: runner.os == 'Linux'
         run: |
-          npm i --no-save playwright
-          npx playwright install --with-deps chromium
+          npm i --no-save playwright@1.63.0
           node tests/ui-smoke.mjs
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: e2e-report-${{ matrix.os }}

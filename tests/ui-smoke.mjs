@@ -61,8 +61,9 @@ try {
     throw new Error(`gateway never became ready\n${probed}\n${exit}\nstdout: ${stdout.slice(-2000)}\nstderr: ${stderr.slice(-2000)}`);
   }
 
+  // the runner's own Chrome: no browser download, no OS-dep install
   const errors = [];
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: 'chrome' });
   const page = await browser.newPage();
   page.on('pageerror', (e) => errors.push(`uncaught: ${e.message}`));
   // resource-load noise (a 404 for /api/icons, say) is the page working as

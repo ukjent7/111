@@ -85,6 +85,7 @@ async fn run_checks() -> Vec<Check> {
     checks.extend(binary_scenario(&client, &gateway).await);
     checks.extend(status_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
     checks.extend(ui_scenario(&client, &gateway).await);
+    checks.extend(host_scenario(gateway_addr));
     checks.extend(provider_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
     checks.extend(config_scenario(&config, &mock_addr.to_string()));
     checks.extend(no_provider_scenario(&client).await);
@@ -92,19 +93,58 @@ async fn run_checks() -> Vec<Check> {
     checks
 }
 
+/// A page that rebound a hostname to 127.0.0.1 would arrive with that
+/// hostname in its Host header; the gateway refuses it before anything else,
+/// key routes included.
+fn host_scenario(gateway_addr: SocketAddr) -> Vec<Check> {
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect(gateway_addr).expect("connect for the host check");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    stream
+        .write_all(
+            b"GET /api/provider/key HTTP/1.1\r\nHost: rebinding.example\r\nConnection: close\r\n\r\n",
+        )
+        .expect("send the rebound request");
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).unwrap_or_default();
+    let status = buf.lines().next().unwrap_or_default().to_owned();
+    vec![check(
+        "a rebound Host is refused before anything else",
+        status.contains(" 403 ")
+            .then(|| status.clone())
+            .ok_or_else(|| format!("answered {status:?}")),
+    )]
+}
+
 /// A provider given on the command line lands in the config file, so the next
-/// launch can be a plain double-click.
+/// launch can be a plain double-click — and the file holds keys, so on Unix
+/// it is owner-only.
 fn config_scenario(config: &Path, mock_addr: &str) -> Vec<Check> {
     let saved = std::fs::read(config)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|v| v["upstream"].as_str().map(str::to_owned));
     let expected = format!("http://{mock_addr}");
+    #[cfg(unix)]
+    let owner_only = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(config)
+            .map(|m| m.permissions().mode() & 0o777)
+            .is_ok_and(|mode| mode == 0o600)
+    };
+    #[cfg(not(unix))]
+    let owner_only = true;
     vec![check(
         "the provider setting is remembered for the next launch",
-        (saved.as_deref() == Some(expected.as_str()))
-            .then(|| format!("config.json now names {saved:?}"))
-            .ok_or_else(|| format!("config.json has {saved:?}, expected {expected:?}")),
+        (saved.as_deref() == Some(expected.as_str()) && owner_only)
+            .then(|| format!("config.json now names {saved:?}, owner-only: {owner_only}"))
+            .ok_or_else(|| {
+                format!(
+                    "config.json has {saved:?}, expected {expected:?}, owner-only: {owner_only}"
+                )
+            }),
     )]
 }
 
@@ -506,12 +546,6 @@ async fn ui_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
         .await
         .unwrap();
     let no_api_headers = no_api.headers().clone();
-    let wails = client
-        .get(format!("{gateway}/wails/runtime.js"))
-        .send()
-        .await
-        .unwrap();
-    let wails_headers = wails.headers().clone();
 
     vec![
         check(
@@ -578,19 +612,6 @@ async fn ui_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
                     "status {}, mock header {:?}",
                     no_api.status(),
                     no_api_headers.get("x-mock-upstream")
-                )
-            }),
-        ),
-        check(
-            "the shell's wails namespace never reaches the upstream",
-            (wails.status() == StatusCode::NOT_FOUND
-                && !wails_headers.contains_key("x-mock-upstream"))
-            .then(|| "404 from magpie itself".into())
-            .ok_or_else(|| {
-                format!(
-                    "status {}, mock header {:?}",
-                    wails.status(),
-                    wails_headers.get("x-mock-upstream")
                 )
             }),
         ),

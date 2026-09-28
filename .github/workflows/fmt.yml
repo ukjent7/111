@@ -1,9 +1,11 @@
 name: Format
 
 # The machine that writes the code has no Rust toolchain, so rustfmt runs
-# here instead: whatever lands on main comes back formatted, which is what
-# keeps CI's `cargo fmt --check` green. Idempotent — a run with nothing to
-# format ends without committing.
+# here instead: whatever lands on main comes back formatted, and a Cargo.lock
+# is born with it if the repo doesn't have one yet. The push itself starts no
+# workflow (GITHUB_TOKEN commits don't trigger any), so CI is dispatched by
+# hand afterwards. Idempotent — a run with nothing to format ends without
+# committing.
 on:
   push:
     branches: [main]
@@ -11,9 +13,10 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
-  group: format-${{ github.ref }}
+  group: format-main
   cancel-in-progress: false
 
 jobs:
@@ -21,18 +24,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: ./.github/actions/setup
         with:
-          components: rustfmt
+          compile: false
       - run: cargo fmt
       - name: Commit the formatted sources
+        id: commit
         run: |
-          git add src tests Cargo.toml
-          git diff --cached --quiet && exit 0
-          git -c user.name='github-actions[bot]' \
-              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-              commit -m "cargo fmt"
-          git push origin main
+          git add -A src tests Cargo.toml Cargo.lock
+          if git diff --cached --quiet; then
+            echo "nothing to format"
+          else
+            git -c user.name='github-actions[bot]' \
+                -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                commit -m "cargo fmt"
+            git push origin main
+            echo committed=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: Trigger CI on the formatted sources
+        if: steps.commit.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref main
