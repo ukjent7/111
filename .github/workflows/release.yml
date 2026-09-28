@@ -1,1 +1,85 @@
-õ,z»?’OÀ¦Úµ¯Ë¡Æ¥ý7¦§úÞ•¾¸
+name: Release
+
+# A version bump in Cargo.toml is the release signal: tag whatever it names,
+# then build the three targets and publish them. The tag is created in this
+# same run because a tag pushed with GITHUB_TOKEN doesn't start a workflow of
+# its own. An unchanged version means there is nothing to release.
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: tag
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          [ -n "$version" ] || { echo "Cargo.toml names no version"; exit 1; }
+          git fetch --tags origin
+          if git rev-parse --quiet --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already released"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git tag "v$version"
+          git push origin "v$version"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: magpie-gateway-linux-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: magpie-gateway-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: magpie-gateway-windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
+      - name: Install Linux GUI build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy, rustfmt
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+      # the E2E suite drives the same release binary that gets shipped
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Package
+        shell: bash
+        run: |
+          dir=target/release
+          [ -f "$dir/magpie-gateway.exe" ] && bin=magpie-gateway.exe || bin=magpie-gateway
+          tar czf "${{ matrix.artifact }}.tar.gz" -C "$dir" "$bin"
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.tag.outputs.tag }}
+          files: ${{ matrix.artifact }}.tar.gz
+          generate_release_notes: true
