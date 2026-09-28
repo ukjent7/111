@@ -5,8 +5,42 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # a newer push supersedes an older run on the same ref; fmt.yml's own
+  # commits land on main, and a full 3-platform matrix each time is waste
+  cancel-in-progress: true
+
 jobs:
+  # clippy and `cargo test` produce different artifacts, so running both on
+  # every platform compiles all dependencies twice. Nothing in this crate is
+  # platform-specific enough to lint differently per OS, so lint once, here,
+  # and let the matrix only build and run. The matrix waits on it: a lint
+  # failure should not buy three more minutes of compiling.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux GUI build deps
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy, rustfmt
+      # its own cache slot: clippy's artifacts would otherwise evict the
+      # test build's on every run
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
   e2e:
+    needs: lint
     strategy:
       fail-fast: false
       matrix:
@@ -18,13 +52,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
       - uses: dtolnay/rust-toolchain@1.98.1
-        with:
-          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Lint
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
+        with:
+          shared-key: e2e-${{ matrix.os }}
       - run: cargo test
       # the JSON-shape e2e can't see the page: drive the real UI in a real
       # browser and fail on any uncaught script error, on every tab
