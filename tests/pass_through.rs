@@ -153,10 +153,10 @@ async fn provider_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &
         let icon = presets[0]["icon"].as_str().unwrap_or("").to_string();
         let res = client.get(format!("{gateway}/api/icons/{id}")).send().await.unwrap();
         let status = res.status();
-        let mime = res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned);
-        check("preset tiles carry models.dev logos", (icon.starts_with("file:") && status.is_success() && mime.as_deref().unwrap_or("").starts_with("image/"))
-            .then(|| format!("{id}: {status} {}", mime.unwrap_or_default()))
-            .ok_or_else(|| format!("{id}: icon {icon:?}, {status} {}", mime.unwrap_or_default())))
+        let mime = res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+        check("preset tiles carry models.dev logos", (icon.starts_with("file:") && status.is_success() && mime.starts_with("image/"))
+            .then(|| format!("{id}: {status} {mime}"))
+            .ok_or_else(|| format!("{id}: icon {icon:?}, {status} {mime}")))
     };
 
     vec![
