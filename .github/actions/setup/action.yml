@@ -31,6 +31,11 @@ runs:
     - name: Generate Cargo.lock when it is missing
       shell: bash
       run: "[ -f Cargo.lock ] || cargo generate-lockfile"
+    # a version bump in Cargo.toml must land in the lock file too, or every
+    # --locked build at that commit refuses to run
+    - name: Sync the workspace version into Cargo.lock
+      shell: bash
+      run: cargo update -w
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       if: inputs.compile == 'true'
       with:
