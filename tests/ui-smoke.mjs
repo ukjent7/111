@@ -81,9 +81,15 @@ try {
   // settings opens from the gear, not from the nav
   await page.click('#prefs', { timeout: 5000 }).catch((e) => errors.push(`click settings: ${e.message}`));
   await page.waitForTimeout(800);
+  // the add sheet: the user's own Custom tile first, then the vendors
+  await page.click('#nav button:has-text("Providers")');
+  await page.click('#addProvider', { timeout: 5000 }).catch((e) => errors.push(`click add provider: ${e.message}`));
+  await page.waitForTimeout(600);
+  const first = await page.textContent('#addSheet .tiles .tile .n').catch(() => null);
+  if (first !== 'Custom') errors.push(`first add-sheet tile is "${first}", expected "Custom"`);
   await browser.close();
 
-  const report = { tabs: 6, errors, passed: errors.length === 0 && brand === 'magpie' };
+  const report = { tabs: 6, customTileFirst: first === 'Custom', errors, passed: errors.length === 0 && brand === 'magpie' };
   fs.writeFileSync('ui-smoke-report.json', JSON.stringify(report, null, 2));
   if (!report.passed) {
     console.error(`UI smoke failed:\n${errors.join('\n')}`);

@@ -44,6 +44,41 @@ pub async fn fetch_catalog(client: &reqwest::Client) -> anyhow::Result<Value> {
     Ok(serde_json::from_str(&text)?)
 }
 
+/// A vendor's models.dev logo, fetched on first use and cached (a miss is
+/// cached too, so a vendor without a logo costs one request per run).
+pub async fn icon(State(app): State<Arc<App>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    let hit = {
+        let cache = app.logos.lock().unwrap();
+        cache.get(&id).cloned()
+    };
+    let logo = match hit {
+        Some(cached) => cached,
+        None => {
+            let fetched = fetch_logo(&app.client, &id).await;
+            app.logos.lock().unwrap().insert(id, fetched.clone());
+            fetched
+        }
+    };
+    match logo {
+        Some((bytes, mime)) => ([(header::CONTENT_TYPE, mime)], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn fetch_logo(client: &reqwest::Client, id: &str) -> Option<(Vec<u8>, String)> {
+    for (ext, mime) in [("svg", "image/svg+xml"), ("png", "image/png")] {
+        let url = format!("https://models.dev/logos/{id}.{ext}");
+        if let Ok(res) = client.get(url).send().await {
+            if res.status().is_success() {
+                if let Ok(bytes) = res.bytes().await {
+                    return Some((bytes.to_vec(), mime.to_owned()));
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn payload(app: &App, cfg: &ConfigState) -> Value {
     let catalog = app.catalog.lock().unwrap();
     let providers: Vec<Value> = cfg.providers.iter().map(|p| enrich(p, &catalog)).collect();
@@ -152,35 +187,6 @@ fn fallback_url(id: &str) -> Option<&'static str> {
     })
 }
 
-/// models.dev ids whose logos this app ships; the rest show the generic mark.
-fn icon_for(id: &str) -> Option<&'static str> {
-    Some(match id {
-        "openai" => "openai",
-        "anthropic" => "anthropic",
-        "deepseek" => "deepseek-color",
-        "moonshotai" | "moonshotai-cn" | "kimi-code-plan-cn" | "kimi-code-plan-global" => "moonshot",
-        "zhipuai" | "zhipuai-coding-plan" => "zhipu-color",
-        "zai" | "zai-coding-plan" => "zai",
-        "siliconflow" | "siliconflow-cn" => "siliconcloud-color",
-        "openrouter" => "openrouter",
-        "302ai" => "ai302-color",
-        "aihubmix" => "aihubmix-color",
-        "minimax" | "minimax-cn" | "minimax-coding-plan" | "minimax-cn-coding-plan" => "minimax-color",
-        "stepfun" | "stepfun-ai" | "stepfun-step-plan" | "stepfun-ai-step-plan" => "stepfun-color",
-        "groq" => "groq",
-        "mistral" => "mistral-color",
-        "xai" => "xai",
-        "google" => "gemini-color",
-        "fireworks-ai" => "fireworks-color",
-        "ollama" | "ollama-cloud" => "ollama",
-        "lmstudio" => "lmstudio",
-        "github-copilot" => "githubcopilot",
-        "alibaba" | "alibaba-cn" | "alibaba-coding-plan" | "alibaba-coding-plan-cn" | "alibaba-token-plan" | "alibaba-token-plan-cn" => "qwen-color",
-        "cloudflare-workers-ai" => "cloudflare-color",
-        _ => return None,
-    })
-}
-
 fn preset_from(p: &Value) -> Option<Value> {
     let id = p["id"].as_str()?;
     let url = p["api"]
@@ -188,17 +194,16 @@ fn preset_from(p: &Value) -> Option<Value> {
         .map(str::to_owned)
         .or_else(|| fallback_url(id).map(str::to_owned))
         .filter(|u| u.starts_with("http") && !u.contains("${"))?;
-    let mut out = json!({
+    Some(json!({
         "id": id,
         "name": p["name"].as_str().unwrap_or(id),
         "kind": "vendor",
         "chat": url,
         "catalog": id,
-    });
-    if let Some(icon) = icon_for(id) {
-        out["icon"] = json!(icon);
-    }
-    Some(out)
+        // the UI renders "file:" icons from /api/icons/<id>, where the
+        // vendor's models.dev logo is served; a 404 falls back to generic
+        "icon": format!("file:{id}"),
+    }))
 }
 
 // ---------- the editor's endpoints ----------

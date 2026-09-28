@@ -144,6 +144,21 @@ async fn provider_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &
     let after_fetch = get_json(format!("{gateway}/api/providers")).await.unwrap();
     let deleted = get_json_raw(post("/api/provider/delete", serde_json::json!({"id": "e2e"}).to_string()).await.unwrap()).await;
 
+    // vendor logos come from models.dev, served through /api/icons/<id>
+    let presets = listed["presets"].as_array().cloned().unwrap_or_default();
+    let logo = if presets.is_empty() {
+        check("preset tiles carry models.dev logos", Ok("no presets to check (catalog offline)".into()))
+    } else {
+        let id = presets[0]["id"].as_str().unwrap_or("").to_string();
+        let icon = presets[0]["icon"].as_str().unwrap_or("").to_string();
+        let res = client.get(format!("{gateway}/api/icons/{id}")).send().await.unwrap();
+        let status = res.status();
+        let mime = res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        check("preset tiles carry models.dev logos", (icon.starts_with("file:") && status.is_success() && mime.as_deref().unwrap_or("").starts_with("image/"))
+            .then(|| format!("{id}: {status} {}", mime.unwrap_or_default()))
+            .ok_or_else(|| format!("{id}: icon {icon:?}, {status} {}", mime.unwrap_or_default())))
+    };
+
     vec![
         check("a provider added in the UI is listed back", (saved["providers"][0]["id"] == serde_json::json!("e2e")
             && saved["providers"][0]["models"].as_array().map(|m| m.len()) == Some(2)
@@ -166,6 +181,7 @@ async fn provider_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &
             && deleted["gateway"]["models"] == serde_json::json!(0))
         .then(|| "no providers left, no models served".into())
         .ok_or_else(|| format!("deleted: {deleted}"))),
+        logo,
     ]
 }
 

@@ -2107,16 +2107,15 @@ function renderAdd() {
     const f = presetQuery.trim().toLowerCase();
     const hit = (pr) => !f || pr.name.toLowerCase().includes(f) || pr.id.includes(f) || hostOf(pr.chat || pr.responses || pr.anthropic).includes(f) || (pr.note || "").toLowerCase().includes(f);
     let any = false;
-    const subs = SUBS.filter((x) => !f || x.name.toLowerCase().includes(f) || x.agent.includes(f) || "subscription".includes(f));
-    if (subs.length) {
-      any = true;
-      tiles.append(el("div", "kind", t("Subscriptions · sign in, no key")));
-      const grid = el("div", "grid");
-      for (const x of subs) grid.append(subTile(x));
-      tiles.append(grid);
-      const w = subs.find((x) => signing?.agent === x.agent);
-      if (w) tiles.append(renderSigning(w));
-    }
+    // the user's own comes first: a custom provider needs no vendor to exist
+    any = true;
+    const custom = el("button", "tile custom" + (editing?.custom ? " on" : ""));
+    const plus = el("span", "ic plus");
+    plus.append(svg(PLUS, 13, 1.8));
+    custom.append(plus, el("span", "tt"));
+    custom.lastChild.append(el("span", "n", t("Custom")), el("span", "s", t("any compatible URL")));
+    custom.onclick = () => { editing = { custom: true }; draft = null; renderProviders(); };
+    tiles.append(custom);
     const gone = providers.excluded.filter((x) => x.quiet && x.provider && (!f || x.agentName.toLowerCase().includes(f) || x.agent.includes(f)));
     if (gone.length) {
       any = true;
@@ -2135,20 +2134,11 @@ function renderAdd() {
     }
     for (const [kind, title] of [["vendor", "Vendors"], ["relay", "Relays · many vendors behind one key"], ["local", "On this machine"]]) {
       const ps = providers.presets.filter((p) => p.kind === kind && hit(p));
-      if (!ps.length && !(kind === "local" && !f)) continue;
+      if (!ps.length) continue;
       any = true;
       tiles.append(el("div", "kind", t(title)));
       const grid = el("div", "grid");
       for (const pr of ps) grid.append(tile(pr));
-      if (kind === "local" && !f) {
-        const c = el("button", "tile custom" + (editing?.custom ? " on" : ""));
-        const ic = el("span", "ic plus");
-        ic.append(svg(PLUS, 13, 1.8));
-        c.append(ic, el("span", "tt"));
-        c.lastChild.append(el("span", "n", t("Custom")), el("span", "s", t("any compatible URL")));
-        c.onclick = () => { editing = { custom: true }; draft = null; renderProviders(); };
-        grid.append(c);
-      }
       tiles.append(grid);
     }
     if (!any) {

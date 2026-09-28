@@ -1,6 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +43,8 @@ pub struct App {
     pub config_path: PathBuf,
     /// models.dev's vendor catalog, fetched at startup and on Sync
     pub catalog: Mutex<Value>,
+    /// vendor logos from models.dev, by id; a miss is remembered too
+    pub logos: Mutex<HashMap<String, Option<(Vec<u8>, String)>>>,
     pub gateway: Gateway,
 }
 
@@ -91,6 +93,7 @@ fn main() -> Result<()> {
         config: tokio::sync::Mutex::new(cfg),
         config_path,
         catalog: Mutex::new(Value::default()),
+        logos: Mutex::new(HashMap::new()),
         gateway: Gateway {
             url: format!("http://{listen}"),
             requests: AtomicU64::new(0),
@@ -107,6 +110,7 @@ fn main() -> Result<()> {
         .route("/api/update", get(|| async { StatusCode::NO_CONTENT }))
         .route("/api/window/quit", post(quit))
         .route("/api/sync", post(providers::sync))
+        .route("/api/icons/{id}", get(providers::icon))
         .route("/api/provider/save", post(providers::save))
         .route("/api/provider/delete", post(providers::delete))
         .route("/api/provider/key", post(providers::reveal_key))
