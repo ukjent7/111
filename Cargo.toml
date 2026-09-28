@@ -1,22 +1,2 @@
-[package]
-name = "magpie-gateway"
-version = "0.4.1"
-edition = "2024"
-description = "Magpie local API gateway with pass-through support"
-authors = ["kk"]
-
-[dependencies]
-anyhow = "1"
-axum = "0.8"
-include_dir = "0.7"
-mime_guess = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-serde_json = "1"
-tao = "0.37"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-wry = "0.57"
-
-[dev-dependencies]
-futures = "0.3"
+õ,z»?’OÀ¦Úµ¯Ë¡Æ¥ı7¦§÷®
+ë
