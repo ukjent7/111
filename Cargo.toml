@@ -1,6 +1,6 @@
 [package]
 name = "magpie-gateway"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 description = "Magpie local API gateway with pass-through support"
 authors = ["kk"]
@@ -10,7 +10,7 @@ anyhow = "1"
 axum = "0.8"
 include_dir = "0.7"
 mime_guess = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 serde_json = "1"
 tao = "0.37"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
