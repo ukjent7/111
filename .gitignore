@@ -6,3 +6,7 @@ node_modules/
 # 不上传 github（见 AGENTS.md）
 AGENTS.md
 /edition-guide
+/.zcodeignore
+
+# 本地抓取的 models.dev 样本，代码不引用
+/modelsdev-sample.json
