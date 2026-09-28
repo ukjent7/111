@@ -78,6 +78,7 @@ async fn run_checks() -> Vec<Check> {
     checks.extend(binary_scenario(&client, &gateway).await);
     checks.extend(status_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
     checks.extend(ui_scenario(&client, &gateway).await);
+    checks.extend(provider_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
     checks.extend(config_scenario(&config, &mock_addr.to_string()));
     checks.extend(no_provider_scenario(&client).await);
     drop(guard); // keep the child alive until every check ran
@@ -95,6 +96,77 @@ fn config_scenario(config: &Path, mock_addr: &str) -> Vec<Check> {
     vec![check("the provider setting is remembered for the next launch", (saved.as_deref() == Some(expected.as_str()))
         .then(|| format!("config.json now names {saved:?}"))
         .ok_or_else(|| format!("config.json has {saved:?}, expected {expected:?}")))]
+}
+
+/// A provider added through the UI's editor: listed back with its models,
+/// then actually used as the pass-through target — path mapped, key swapped
+/// in, extra headers attached — and gone again after Remove.
+async fn provider_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str, captured: &Shared) -> Vec<Check> {
+    let post = |path: &str, body: String| {
+        let client = client.clone();
+        let url = format!("{gateway}{path}");
+        async move { client.post(url).header("content-type", "application/json").body(body).send().await }
+    };
+    let get_json = |url: String| {
+        let client = client.clone();
+        async move {
+            let body = client.get(url).send().await?.text().await?;
+            Ok::<_, reqwest::Error>(serde_json::from_str::<serde_json::Value>(&body).expect("api answer is json"))
+        }
+    };
+    let save_body = serde_json::json!({
+        "id": "e2e", "new": true, "name": "E2E Vendor", "api": "openai",
+        "chat": format!("http://{mock_addr}/v1"), "key": "sk-test-1234",
+        "models": ["alpha", "beta"], "headers": { "x-extra": "1" },
+    });
+    let saved = get_json_raw(&post("/api/provider/save", save_body.to_string()).await.unwrap());
+    let listed = get_json(format!("{gateway}/api/providers")).await.unwrap();
+
+    let sent_body = r#"{"model":"alpha","messages":[{"role":"user","content":"hi"}]}"#;
+    client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .header("authorization", "Bearer magpie")
+        .header("x-extra", "client")
+        .body(sent_body)
+        .send()
+        .await
+        .unwrap();
+    let c = captured.lock().unwrap().clone();
+
+    let fetched = get_json_raw(&post("/api/provider/models", serde_json::json!({"id": "e2e"}).to_string()).await.unwrap());
+    let after_fetch = get_json(format!("{gateway}/api/providers")).await.unwrap();
+    let deleted = get_json_raw(&post("/api/provider/delete", serde_json::json!({"id": "e2e"}).to_string()).await.unwrap());
+
+    vec![
+        check("a provider added in the UI is listed back", (saved["providers"][0]["id"] == serde_json::json!("e2e")
+            && saved["providers"][0]["models"].as_array().map(|m| m.len()) == Some(2)
+            && saved["providers"][0]["key"]["set"] == serde_json::json!(true)
+            && saved["gateway"]["models"] == serde_json::json!(2)
+            && listed["presets"].is_array())
+        .then(|| format!("{} preset tiles, gateway serves {} models", listed["presets"].as_array().map(|p| p.len()).unwrap_or(0), saved["gateway"]["models"]))
+        .ok_or_else(|| format!("saved: {saved}, listed: {listed}"))),
+        check("requests route through the provider, with its key", (c.path == "/chat/completions"
+            && c.headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer sk-test-1234")
+            && c.headers.get("x-extra").and_then(|v| v.to_str().ok()) == Some("1")
+            && c.body == sent_body.as_bytes())
+        .then(|| format!("{} {} with the provider's key and headers", c.method, c.path))
+        .ok_or_else(|| format!("captured {c:#?}"))),
+        check("the vendor's model list lands in the provider", (fetched["count"] == serde_json::json!(3)
+            && after_fetch["gateway"]["models"] == serde_json::json!(3))
+        .then(|| "3 models fetched, all served".into())
+        .ok_or_else(|| format!("fetched {fetched}, after {after_fetch}"))),
+        check("a provider removed in the UI is gone", (deleted["providers"].as_array().map(|p| p.is_empty()).unwrap_or(false)
+            && deleted["gateway"]["models"] == serde_json::json!(0))
+        .then(|| "no providers left, no models served".into())
+        .ok_or_else(|| format!("deleted: {deleted}"))),
+    ]
+}
+
+/// api answers arrive as json bodies (or json errors the page can show)
+fn get_json_raw(res: reqwest::Response) -> serde_json::Value {
+    let status = res.status();
+    let text = res.text().unwrap_or_default();
+    serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "error": text, "status": status.as_u16() }))
 }
 
 /// The double-click experience before any provider was ever set: the app
@@ -307,6 +379,10 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
             .header("content-type", "text/event-stream")
             .header("x-request-id", "upstream-42")
             .body(sse_body())
+            .unwrap(),
+        "/v1/models" => Response::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"data":[{"id":"a"},{"id":"b"},{"id":"c"}]}"#))
             .unwrap(),
         "/echo" => Response::builder()
             .header("content-type", "application/octet-stream")

@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,30 +10,40 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderMap, HeaderName, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use include_dir::{include_dir, Dir};
 use reqwest::redirect::Policy;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
+
+mod providers;
 
 // the prepared UI, embedded so the binary alone is the whole desktop app
 static UI: Dir<'_> = include_dir!("ui-source");
 
-struct Gateway {
-    url: String,
-    requests: AtomicU64,
-    errors: AtomicU64,
-    calls: Mutex<VecDeque<Value>>,
+pub struct Gateway {
+    pub url: String,
+    pub requests: AtomicU64,
+    pub errors: AtomicU64,
+    pub calls: Mutex<VecDeque<Value>>,
 }
 
-struct App {
-    client: reqwest::Client,
-    upstream: String,
-    gateway: Gateway,
+pub struct ConfigState {
+    pub listen: Option<String>,
+    pub upstream: String,
+    pub providers: Vec<Value>,
+}
+
+pub struct App {
+    pub client: reqwest::Client,
+    pub config: tokio::sync::Mutex<ConfigState>,
+    pub config_path: PathBuf,
+    /// models.dev's vendor catalog, fetched at startup and on Sync
+    pub catalog: Mutex<Value>,
+    pub gateway: Gateway,
 }
 
 fn main() -> Result<()> {
@@ -55,28 +66,31 @@ fn main() -> Result<()> {
     // the app opens its window no matter what; a provider given on the command
     // line is remembered, so the next launch can be a plain double-click
     let config_path = config_path(config_flag.as_deref())?;
-    let (config_listen, config_upstream) = load_config(&config_path);
+    let mut cfg = load_config(&config_path);
     if let Some(given) = &upstream {
-        save_config(&config_path, listen.as_deref().or(config_listen.as_deref()), Some(given))?;
+        cfg.upstream = given.clone();
+        persist(&config_path, &cfg)?;
         tracing::info!("provider saved to {}", config_path.display());
     }
     let listen: SocketAddr = listen
-        .or(config_listen)
+        .or(cfg.listen.take())
         .unwrap_or_else(|| "127.0.0.1:8787".into())
         .parse()
         .context("invalid --listen address")?;
-    let upstream = upstream.or(config_upstream).unwrap_or_default();
-    if !upstream.is_empty() {
-        reqwest::Url::parse(&upstream).context("invalid --upstream URL")?;
+    if !cfg.upstream.is_empty() {
+        reqwest::Url::parse(&cfg.upstream).context("invalid --upstream URL")?;
     }
 
     let client = reqwest::Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .build()?;
+    let role = if cfg.upstream.is_empty() { ", no provider configured yet".to_owned() } else { format!(", raw upstream {}", cfg.upstream) };
     let app = Arc::new(App {
         client,
-        upstream,
+        config: tokio::sync::Mutex::new(cfg),
+        config_path,
+        catalog: Mutex::new(Value::default()),
         gateway: Gateway {
             url: format!("http://{listen}"),
             requests: AtomicU64::new(0),
@@ -84,18 +98,20 @@ fn main() -> Result<()> {
             calls: Mutex::new(VecDeque::new()),
         },
     });
-    let role = if app.upstream.is_empty() {
-        "no provider configured yet — pass --upstream once and it is remembered".to_owned()
-    } else {
-        format!("everything else passes through to {}", app.upstream)
-    };
-    tracing::info!("gateway listening on http://{listen} — UI at that address, {role}");
+    tracing::info!("gateway listening on http://{listen} — UI at that address{role}");
+
     let router = Router::new()
         .route("/api/state", get(api_state))
-        .route("/api/providers", get(api_providers))
+        .route("/api/providers", get(providers::list))
         .route("/api/gateway/trace", get(api_trace))
         .route("/api/update", get(|| async { StatusCode::NO_CONTENT }))
         .route("/api/window/quit", post(quit))
+        .route("/api/sync", post(providers::sync))
+        .route("/api/provider/save", post(providers::save))
+        .route("/api/provider/delete", post(providers::delete))
+        .route("/api/provider/key", post(providers::reveal_key))
+        .route("/api/provider/models", post(providers::fetch_models))
+        .route("/api/provider/test", post(providers::test))
         .fallback(entry)
         .layer(DefaultBodyLimit::disable())
         .with_state(app.clone());
@@ -103,6 +119,19 @@ fn main() -> Result<()> {
     // the gateway serves from background threads; the desktop window owns the
     // main thread (a requirement on macOS), and closing it ends the process
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    {
+        // models.dev in the background: the Providers tab wants its vendor list
+        let app = app.clone();
+        runtime.spawn(async move {
+            match providers::fetch_catalog(&app.client).await {
+                Ok(v) => {
+                    *app.catalog.lock().unwrap() = v;
+                    tracing::info!("models.dev catalog loaded");
+                }
+                Err(e) => tracing::warn!("models.dev not fetched yet (Sync retries): {e}"),
+            }
+        });
+    }
     let listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
     let server = runtime.spawn(async move { axum::serve(listener, router).await });
     if window {
@@ -159,12 +188,10 @@ async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
 }
 
 /// Whatever arrives goes out unchanged: same method, path, query, headers and
-/// body bytes (streamed both ways, so SSE and big payloads never buffer).
+/// body bytes (streamed both ways, so SSE and big payloads never buffer) —
+/// to the provider the UI configured, or to the raw upstream from the
+/// command line. Only the key is swapped in.
 async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
-    if app.upstream.is_empty() {
-        let msg = "magpie: no provider configured yet — pass --upstream <url> once, it is remembered";
-        return (StatusCode::BAD_GATEWAY, msg.to_owned()).into_response();
-    }
     let started = Instant::now();
     let (mut parts, body) = req.into_parts();
     let path = parts
@@ -182,8 +209,50 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     parts.headers.remove(header::HOST);
     parts.headers.remove(header::CONTENT_LENGTH);
 
-    let url = format!("{}{}", app.upstream.trim_end_matches('/'), path);
-    let mut sent = app.client.request(parts.method, url).headers(parts.headers);
+    enum Dest {
+        Provider(providers::Target),
+        Legacy(String),
+    }
+    let dest = {
+        let cfg = app.config.lock().await;
+        if cfg.providers.is_empty() {
+            (!cfg.upstream.is_empty()).then(|| Dest::Legacy(cfg.upstream.clone()))
+        } else {
+            providers::route_for(&cfg, &path).map(Dest::Provider)
+        }
+    };
+    let to = match dest {
+        None => {
+            let msg = "magpie: no provider configured yet — add one in the Providers tab, or pass --upstream <url> once";
+            return (StatusCode::BAD_GATEWAY, msg.to_owned()).into_response();
+        }
+        Some(Dest::Legacy(base)) => format!("{}{}", base.trim_end_matches('/'), path),
+        Some(Dest::Provider(t)) => {
+            parts.headers.remove(header::AUTHORIZATION);
+            parts.headers.remove("x-api-key");
+            if !t.key.is_empty() {
+                if let Ok(v) = HeaderValue::from_str(&t.key) {
+                    if t.anthropic {
+                        parts.headers.insert(HeaderName::from_static("x-api-key"), v);
+                    } else if let Ok(bearer) = HeaderValue::from_str(&format!("Bearer {}", t.key)) {
+                        parts.headers.insert(header::AUTHORIZATION, bearer);
+                    }
+                }
+            }
+            if let Some(extra) = t.extra.as_object() {
+                for (name, value) in extra {
+                    if let (Ok(name), Ok(value)) =
+                        (HeaderName::try_from(name.as_str()), HeaderValue::try_from(value.as_str().unwrap_or_default()))
+                    {
+                        parts.headers.insert(name, value);
+                    }
+                }
+            }
+            t.url
+        }
+    };
+
+    let mut sent = app.client.request(parts.method, &to).headers(parts.headers);
     if has_body {
         sent = sent.body(reqwest::Body::wrap_stream(body.into_data_stream()));
     }
@@ -192,7 +261,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
         Ok(res) => res,
         Err(err) => {
             tracing::warn!(%method, %path, error = %err, "upstream request failed");
-            record(&app, &path, StatusCode::BAD_GATEWAY, started, Some(err.to_string()));
+            record(&app, &path, &to, StatusCode::BAD_GATEWAY, started, Some(err.to_string()));
             return (StatusCode::BAD_GATEWAY, format!("magpie: {err}")).into_response();
         }
     };
@@ -206,12 +275,12 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
         .body(body)
         .expect("status and stream body are always valid");
     *res.headers_mut() = headers;
-    record(&app, &path, status, started, None);
+    record(&app, &path, &to, status, started, None);
     tracing::info!(%method, %path, status = status.as_u16(), ms = started.elapsed().as_millis() as u64, "passed through");
     res
 }
 
-fn record(app: &App, path: &str, status: StatusCode, started: Instant, error: Option<String>) {
+fn record(app: &App, path: &str, to: &str, status: StatusCode, started: Instant, error: Option<String>) {
     app.gateway.requests.fetch_add(1, Ordering::Relaxed);
     if status.is_client_error() || status.is_server_error() {
         app.gateway.errors.fetch_add(1, Ordering::Relaxed);
@@ -220,7 +289,7 @@ fn record(app: &App, path: &str, status: StatusCode, started: Instant, error: Op
         "time": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
         "model": "",
         "from": path,
-        "to": path,
+        "to": to,
         "status": status.as_u16(),
         "ms": started.elapsed().as_millis() as u64,
         "error": error,
@@ -234,23 +303,6 @@ fn record(app: &App, path: &str, status: StatusCode, started: Instant, error: Op
 
 async fn api_state() -> impl IntoResponse {
     Json(json!({ "agents": [], "profiles": [], "settings": {} }))
-}
-
-async fn api_providers(State(app): State<Arc<App>>) -> impl IntoResponse {
-    let g = &app.gateway;
-    let calls: Vec<Value> = g.calls.lock().unwrap().iter().rev().cloned().collect();
-    Json(json!({
-        "providers": [],
-        "presets": [],
-        "gateway": {
-            "running": true,
-            "mine": true,
-            "url": g.url,
-            "models": 0,
-            "groups": [],
-            "calls": calls,
-        },
-    }))
 }
 
 async fn api_trace(State(app): State<Arc<App>>, req: Request) -> impl IntoResponse {
@@ -277,43 +329,6 @@ async fn quit() -> Response {
     std::process::exit(0)
 }
 
-/// Where the provider and port settings live; `--config` moves the file
-/// (the E2E suite keeps its own in a temp dir).
-fn config_path(flag: Option<&str>) -> Result<PathBuf> {
-    if let Some(path) = flag {
-        return Ok(path.into());
-    }
-    let base = match std::env::consts::OS {
-        "windows" => std::env::var_os("APPDATA").map(PathBuf::from).context("APPDATA is not set")?,
-        "macos" => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join("Library/Application Support"),
-        _ => std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .context("neither XDG_CONFIG_HOME nor HOME is set")?,
-    };
-    Ok(base.join("magpie").join("config.json"))
-}
-
-fn load_config(path: &Path) -> (Option<String>, Option<String>) {
-    let saved = std::fs::read(path).ok().map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap_or_default());
-    let field = |key: &str| {
-        saved
-            .as_ref()
-            .and_then(|v| v.get(key))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-    };
-    (field("listen"), field("upstream"))
-}
-
-fn save_config(path: &Path, listen: Option<&str>, upstream: Option<&str>) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(&json!({ "listen": listen, "upstream": upstream }))?)?;
-    Ok(())
-}
-
 /// Hop-by-hop headers describe one connection, never the message; anything the
 /// `Connection` header lists belongs to them too (RFC 9110 §7.6.1).
 fn strip_hop_by_hop(headers: &mut HeaderMap) {
@@ -337,4 +352,55 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     ] {
         headers.remove(name);
     }
+}
+
+/// Where the provider and port settings live; `--config` moves the file
+/// (the E2E suite keeps its own in a temp dir).
+fn config_path(flag: Option<&str>) -> Result<PathBuf> {
+    if let Some(path) = flag {
+        return Ok(path.into());
+    }
+    let base = match std::env::consts::OS {
+        "windows" => std::env::var_os("APPDATA").map(PathBuf::from).context("APPDATA is not set")?,
+        "macos" => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join("Library/Application Support"),
+        _ => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .context("neither XDG_CONFIG_HOME nor HOME is set")?,
+    };
+    Ok(base.join("magpie").join("config.json"))
+}
+
+fn load_config(path: &Path) -> ConfigState {
+    let saved = std::fs::read(path).ok().map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap_or_default());
+    let field = |key: &str| {
+        saved
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    };
+    ConfigState {
+        listen: field("listen"),
+        upstream: field("upstream").unwrap_or_default(),
+        providers: saved
+            .as_ref()
+            .and_then(|v| v.get("providers"))
+            .and_then(Value::as_array)
+            .map(|a| a.clone())
+            .unwrap_or_default(),
+    }
+}
+
+pub fn persist(path: &Path, cfg: &ConfigState) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let body = json!({
+        "listen": cfg.listen,
+        "upstream": if cfg.upstream.is_empty() { Value::Null } else { json!(cfg.upstream) },
+        "providers": cfg.providers,
+    });
+    std::fs::write(path, serde_json::to_string_pretty(&body)?)?;
+    Ok(())
 }
