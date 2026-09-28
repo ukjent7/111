@@ -104,7 +104,7 @@ fn run_window(url: &str) {
     use tao::window::WindowBuilder;
     use wry::WebViewBuilder;
 
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = EventLoop::new();
     let app_window = WindowBuilder::new()
         .with_title("magpie")
         .with_inner_size(LogicalSize::new(1120.0, 780.0))
