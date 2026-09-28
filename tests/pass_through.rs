@@ -206,6 +206,8 @@ async fn ui_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
     let trace = get_json(format!("{gateway}/api/gateway/trace?after=0")).await.unwrap();
     let no_api = client.get(format!("{gateway}/api/nope")).send().await.unwrap();
     let no_api_headers = no_api.headers().clone();
+    let wails = client.get(format!("{gateway}/wails/runtime.js")).send().await.unwrap();
+    let wails_headers = wails.headers().clone();
 
     vec![
         check("the UI is served at the gateway root", (html.contains("<title>magpie</title>")
@@ -238,6 +240,10 @@ async fn ui_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
             && !no_api_headers.contains_key("x-mock-upstream"))
         .then(|| "404 from magpie itself".into())
         .ok_or_else(|| format!("status {}, mock header {:?}", no_api.status(), no_api_headers.get("x-mock-upstream")))),
+        check("the shell's wails namespace never reaches the upstream", (wails.status() == StatusCode::NOT_FOUND
+            && !wails_headers.contains_key("x-mock-upstream"))
+        .then(|| "404 from magpie itself".into())
+        .ok_or_else(|| format!("status {}, mock header {:?}", wails.status(), wails_headers.get("x-mock-upstream")))),
     ]
 }
 
@@ -303,7 +309,7 @@ fn spawn_gateway(gateway: SocketAddr, mock: SocketAddr) -> Gateway {
         .arg(gateway.to_string())
         .arg("--upstream")
         .arg(format!("http://{mock}"))
-        .arg("--no-open")
+        .arg("--no-window")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

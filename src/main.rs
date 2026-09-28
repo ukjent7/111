@@ -1,6 +1,7 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,7 +11,7 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use include_dir::{include_dir, Dir};
 use reqwest::redirect::Policy;
@@ -33,20 +34,19 @@ struct App {
     gateway: Gateway,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let (mut listen, mut upstream, mut open) = (None, None, true);
+    let (mut listen, mut upstream, mut window) = (None, None, true);
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--listen" => listen = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
             "--upstream" => upstream = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
-            "--no-open" => open = false,
-            other => bail!("unknown argument {other:?}; usage: magpie-gateway --listen <addr> --upstream <url> [--no-open]"),
+            "--no-window" => window = false,
+            other => bail!("unknown argument {other:?}; usage: magpie-gateway --listen <addr> --upstream <url> [--no-window]"),
         }
     }
     let listen: SocketAddr = listen
@@ -74,25 +74,59 @@ async fn main() -> Result<()> {
         },
     });
     tracing::info!("gateway listening on http://{listen} — UI at that address, everything else passes through to {}", app.upstream);
-    if open {
-        open_browser(&app.gateway.url);
-    }
     let router = Router::new()
         .route("/api/state", get(api_state))
         .route("/api/providers", get(api_providers))
         .route("/api/gateway/trace", get(api_trace))
         .route("/api/update", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/api/window/quit", post(quit))
         .fallback(entry)
         .layer(DefaultBodyLimit::disable())
-        .with_state(app);
+        .with_state(app.clone());
 
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    axum::serve(listener, router).await?;
+    // the gateway serves from background threads; the desktop window owns the
+    // main thread (a requirement on macOS), and closing it ends the process
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
+    let server = runtime.spawn(async move { axum::serve(listener, router).await });
+    if window {
+        run_window(&app.gateway.url);
+    }
+    runtime.block_on(server)??;
     Ok(())
 }
 
-/// The UI when the path is one of its files, a JSON 404 for unknown API
-/// calls (never forwarded upstream), and lossless pass-through for the rest.
+/// The desktop shell: one webview window pointed at the gateway's own UI.
+fn run_window(url: &str) {
+    use tao::dpi::LogicalSize;
+    use tao::event::{Event, WindowEvent};
+    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::window::WindowBuilder;
+    use wry::WebViewBuilder;
+
+    let event_loop = EventLoop::new().expect("event loop");
+    let app_window = WindowBuilder::new()
+        .with_title("magpie")
+        .with_inner_size(LogicalSize::new(1120.0, 780.0))
+        .build(&event_loop)
+        .expect("window");
+    let _webview = WebViewBuilder::new()
+        .with_url(format!("{url}/?shell=1"))
+        .build(&app_window)
+        .expect("webview");
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
+            *control_flow = ControlFlow::Exit;
+        }
+    });
+    // if the event loop ever hands control back, the window is gone: end the app
+    std::process::exit(0)
+}
+
+/// The UI when the path is one of its files, a JSON 404 for the shell's
+/// reserved namespaces (never forwarded upstream), and lossless pass-through
+/// for the rest.
 async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
     let name = req.uri().path().trim_start_matches('/');
     if let Some(file) = UI.get_file(if name.is_empty() { "index.html" } else { name }) {
@@ -104,8 +138,8 @@ async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
             return ([("content-type", "image/svg+xml")], icon.contents()).into_response();
         }
     }
-    if name == "api" || name.starts_with("api/") {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "no such api" }))).into_response();
+    if name == "api" || name.starts_with("api/") || name == "wails" || name.starts_with("wails/") {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "reserved by the shell" }))).into_response();
     }
     proxy(State(app), req).await
 }
@@ -220,6 +254,11 @@ async fn api_trace(State(app): State<Arc<App>>, req: Request) -> impl IntoRespon
     }))
 }
 
+/// the UI footer's Quit: end the whole app, window and gateway together
+async fn quit() -> Response {
+    std::process::exit(0)
+}
+
 /// Hop-by-hop headers describe one connection, never the message; anything the
 /// `Connection` header lists belongs to them too (RFC 9110 §7.6.1).
 fn strip_hop_by_hop(headers: &mut HeaderMap) {
@@ -243,25 +282,4 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     ] {
         headers.remove(name);
     }
-}
-
-fn open_browser(url: &str) {
-    let mut cmd = match std::env::consts::OS {
-        "windows" => {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "start", "", url]);
-            c
-        }
-        "macos" => {
-            let mut c = Command::new("open");
-            c.arg(url);
-            c
-        }
-        _ => {
-            let mut c = Command::new("xdg-open");
-            c.arg(url);
-            c
-        }
-    };
-    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
