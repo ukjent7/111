@@ -4,6 +4,7 @@
 
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -66,7 +67,9 @@ async fn run_checks() -> Vec<Check> {
     let captured: Shared = Arc::default();
     let mock_addr = spawn_mock(captured.clone()).await;
     let gateway_addr = free_port();
-    let guard = spawn_gateway(gateway_addr, mock_addr);
+    let config = std::env::temp_dir().join(format!("magpie-e2e-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&config);
+    let guard = spawn_gateway(gateway_addr, mock_addr, &config, true);
     let gateway = format!("http://{gateway_addr}");
     let client = reqwest::Client::new();
 
@@ -75,8 +78,40 @@ async fn run_checks() -> Vec<Check> {
     checks.extend(binary_scenario(&client, &gateway).await);
     checks.extend(status_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
     checks.extend(ui_scenario(&client, &gateway).await);
+    checks.extend(config_scenario(&config, &mock_addr.to_string()));
+    checks.extend(no_provider_scenario(&client).await);
     drop(guard); // keep the child alive until every check ran
     checks
+}
+
+/// A provider given on the command line lands in the config file, so the next
+/// launch can be a plain double-click.
+fn config_scenario(config: &Path, mock_addr: &str) -> Vec<Check> {
+    let saved = std::fs::read(config)
+        .ok()
+        .and_then(|bytes| serde_json::from_str::<serde_json::Value>(&bytes).ok())
+        .and_then(|v| v["upstream"].as_str().map(str::to_owned));
+    let expected = format!("http://{mock_addr}");
+    vec![check("the provider setting is remembered for the next launch", (saved.as_deref() == Some(expected.as_str()))
+        .then(|| format!("config.json now names {saved:?}"))
+        .ok_or_else(|| format!("config.json has {saved:?}, expected {expected:?}")))]
+}
+
+/// The double-click experience before any provider was ever set: the app
+/// still runs and answers with a clear hint instead of refusing to start.
+async fn no_provider_scenario(client: &reqwest::Client) -> Vec<Check> {
+    let addr = free_port();
+    let config = std::env::temp_dir().join(format!("magpie-e2e-empty-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&config);
+    let guard = spawn_gateway(addr, "0.0.0.0:1".parse().unwrap(), &config, false);
+    let res = client.get(format!("http://{addr}/v1/chat/completions")).send().await.unwrap();
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    drop(guard);
+
+    vec![check("with no provider configured, the app still runs and answers clearly", (status == StatusCode::BAD_GATEWAY && body.contains("provider"))
+        .then(|| format!("{status}: {body}"))
+        .ok_or_else(|| format!("{status}: {body}")))]
 }
 
 /// An OpenAI-style POST whose answer is an SSE stream with a quiet gap in the
@@ -303,13 +338,15 @@ fn sse_body() -> Body {
     }))
 }
 
-fn spawn_gateway(gateway: SocketAddr, mock: SocketAddr) -> Gateway {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_magpie-gateway"))
-        .arg("--listen")
-        .arg(gateway.to_string())
-        .arg("--upstream")
-        .arg(format!("http://{mock}"))
-        .arg("--no-window")
+fn spawn_gateway(gateway: SocketAddr, mock: SocketAddr, config: &Path, with_provider: bool) -> Gateway {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_magpie-gateway"));
+    cmd.arg("--listen").arg(gateway.to_string());
+    cmd.arg("--config").arg(config);
+    cmd.arg("--no-window");
+    if with_provider {
+        cmd.arg("--upstream").arg(format!("http://{mock}"));
+    }
+    let mut child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

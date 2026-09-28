@@ -16,6 +16,7 @@ use axum::{Json, Router};
 use include_dir::{include_dir, Dir};
 use reqwest::redirect::Policy;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 // the prepared UI, embedded so the binary alone is the whole desktop app
@@ -39,25 +40,35 @@ fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let (mut listen, mut upstream, mut window) = (None, None, true);
+    let (mut listen, mut upstream, mut window, mut config_flag) = (None, None, true, None);
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--listen" => listen = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
             "--upstream" => upstream = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
+            "--config" => config_flag = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
             "--no-window" => window = false,
-            other => bail!("unknown argument {other:?}; usage: magpie-gateway --listen <addr> --upstream <url> [--no-window]"),
+            other => bail!("unknown argument {other:?}; usage: magpie-gateway [--listen <addr>] [--upstream <url>] [--config <path>] [--no-window]"),
         }
     }
+
+    // the app opens its window no matter what; a provider given on the command
+    // line is remembered, so the next launch can be a plain double-click
+    let config_path = config_path(config_flag.as_deref())?;
+    let (config_listen, config_upstream) = load_config(&config_path);
+    if let Some(given) = &upstream {
+        save_config(&config_path, listen.as_deref().or(config_listen.as_deref()), Some(given))?;
+        tracing::info!("provider saved to {}", config_path.display());
+    }
     let listen: SocketAddr = listen
-        .or_else(|| std::env::var("MAGPIE_LISTEN").ok())
+        .or(config_listen)
         .unwrap_or_else(|| "127.0.0.1:8787".into())
         .parse()
         .context("invalid --listen address")?;
-    let upstream = upstream
-        .or_else(|| std::env::var("MAGPIE_UPSTREAM").ok())
-        .context("no upstream: pass --upstream <url> or set MAGPIE_UPSTREAM")?;
-    reqwest::Url::parse(&upstream).context("invalid --upstream URL")?;
+    let upstream = upstream.or(config_upstream).unwrap_or_default();
+    if !upstream.is_empty() {
+        reqwest::Url::parse(&upstream).context("invalid --upstream URL")?;
+    }
 
     let client = reqwest::Client::builder()
         .redirect(Policy::none())
@@ -73,7 +84,12 @@ fn main() -> Result<()> {
             calls: Mutex::new(VecDeque::new()),
         },
     });
-    tracing::info!("gateway listening on http://{listen} — UI at that address, everything else passes through to {}", app.upstream);
+    let role = if app.upstream.is_empty() {
+        "no provider configured yet — pass --upstream once and it is remembered".to_owned()
+    } else {
+        format!("everything else passes through to {}", app.upstream)
+    };
+    tracing::info!("gateway listening on http://{listen} — UI at that address, {role}");
     let router = Router::new()
         .route("/api/state", get(api_state))
         .route("/api/providers", get(api_providers))
@@ -147,6 +163,10 @@ async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
 /// Whatever arrives goes out unchanged: same method, path, query, headers and
 /// body bytes (streamed both ways, so SSE and big payloads never buffer).
 async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
+    if app.upstream.is_empty() {
+        let msg = "magpie: no provider configured yet — pass --upstream <url> once, it is remembered";
+        return (StatusCode::BAD_GATEWAY, msg.to_owned()).into_response();
+    }
     let started = Instant::now();
     let (mut parts, body) = req.into_parts();
     let path = parts
@@ -257,6 +277,43 @@ async fn api_trace(State(app): State<Arc<App>>, req: Request) -> impl IntoRespon
 /// the UI footer's Quit: end the whole app, window and gateway together
 async fn quit() -> Response {
     std::process::exit(0)
+}
+
+/// Where the provider and port settings live; `--config` moves the file
+/// (the E2E suite keeps its own in a temp dir).
+fn config_path(flag: Option<&str>) -> Result<PathBuf> {
+    if let Some(path) = flag {
+        return Ok(path.into());
+    }
+    let base = match std::env::consts::OS {
+        "windows" => std::env::var_os("APPDATA").map(PathBuf::from).context("APPDATA is not set")?,
+        "macos" => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join("Library/Application Support"),
+        _ => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .context("neither XDG_CONFIG_HOME nor HOME is set")?,
+    };
+    Ok(base.join("magpie").join("config.json"))
+}
+
+fn load_config(path: &Path) -> (Option<String>, Option<String>) {
+    let saved = std::fs::read(path).ok().map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap_or_default());
+    let field = |key: &str| {
+        saved
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    };
+    (field("listen"), field("upstream"))
+}
+
+fn save_config(path: &Path, listen: Option<&str>, upstream: Option<&str>) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&json!({ "listen": listen, "upstream": upstream }))?)?;
+    Ok(())
 }
 
 /// Hop-by-hop headers describe one connection, never the message; anything the
