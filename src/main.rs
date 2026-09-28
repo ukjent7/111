@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
             calls: Mutex::new(VecDeque::new()),
         },
     });
+    tracing::info!("gateway listening on http://{listen} — UI at that address, everything else passes through to {}", app.upstream);
     let router = Router::new()
         .route("/api/state", get(api_state))
         .route("/api/providers", get(api_providers))
@@ -83,7 +84,6 @@ async fn main() -> Result<()> {
         .with_state(app);
 
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!("gateway listening on http://{listen} — UI at that address, everything else passes through to {}", app.upstream);
     if open {
         open_browser(&app.gateway.url);
     }
