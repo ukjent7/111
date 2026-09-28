@@ -31,7 +31,7 @@ jobs:
       - name: UI smoke (real browser, every tab)
         if: runner.os == 'Linux'
         run: |
-          npm i -g playwright
+          npm i --no-save playwright
           npx playwright install --with-deps chromium
           node tests/ui-smoke.mjs
       - uses: actions/upload-artifact@v4
