@@ -263,7 +263,7 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     if let Err(e) = persist(&app.config_path, &cfg) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("could not save the config: {e}"));
     }
-    payload(&app, &cfg).into_response()
+    Json(payload(&app, &cfg)).into_response()
 }
 
 pub async fn delete(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
@@ -275,7 +275,7 @@ pub async fn delete(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Res
     if let Err(e) = persist(&app.config_path, &cfg) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("could not save the config: {e}"));
     }
-    payload(&app, &cfg).into_response()
+    Json(payload(&app, &cfg)).into_response()
 }
 
 pub async fn reveal_key(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
