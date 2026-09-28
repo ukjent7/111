@@ -111,6 +111,9 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
+          # only the build matrix's archives; the reusable CI's e2e reports
+          # are artifacts too and must not become release assets
+          pattern: magpie-gateway-*
           path: dist
           merge-multiple: true
       - name: Checksums
