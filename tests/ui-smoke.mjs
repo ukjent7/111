@@ -33,8 +33,10 @@ const connected = (port) =>
 const port = await freePort();
 const config = path.join(os.tmpdir(), `magpie-ui-smoke-${process.pid}.json`);
 const gateway = spawn(bin, ['--listen', `127.0.0.1:${port}`, '--config', config, '--no-window']);
+let stdout = '';
 let stderr = '';
 let exit = '';
+gateway.stdout.on('data', (d) => (stdout += d));
 gateway.stderr.on('data', (d) => (stderr += d));
 gateway.on('error', (e) => (exit += `spawn error: ${e.message}`));
 gateway.on('exit', (code, signal) => (exit += `exited code=${code} signal=${signal}`));
@@ -44,7 +46,19 @@ try {
     if (exit) break; // died on its feet — report why instead of timing out
     up = await connected(port);
   }
-  if (!up) throw new Error(`gateway never became ready\n${exit}\n${stderr.slice(-2000)}`);
+  if (!up) {
+    // everything the runner knows about the process, in one glance
+    let probed = '';
+    try {
+      const { execSync } = await import('node:child_process');
+      const alive = process.kill(gateway.pid, 0) ? 'alive' : 'dead';
+      const listening = execSync(`ss -tln 2>/dev/null | grep ${port} || true`).toString().trim();
+      probed = `process ${alive}; ss: ${listening || 'port not listening'}`;
+    } catch (e) {
+      probed = `probe failed: ${e.message}`;
+    }
+    throw new Error(`gateway never became ready\n${probed}\n${exit}\nstdout: ${stdout.slice(-2000)}\nstderr: ${stderr.slice(-2000)}`);
+  }
 
   const errors = [];
   const browser = await chromium.launch();
