@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: magpie-gateway-linux-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: magpie-gateway-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: magpie-gateway-windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      # the E2E suite drives the same release binary that gets shipped
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Package
+        shell: bash
+        run: |
+          dir=target/release
+          [ -f "$dir/magpie-gateway.exe" ] && bin=magpie-gateway.exe || bin=magpie-gateway
+          tar czf "${{ matrix.artifact }}.tar.gz" -C "$dir" "$bin"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}.tar.gz
+          generate_release_notes: true
