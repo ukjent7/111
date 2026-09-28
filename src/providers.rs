@@ -18,7 +18,7 @@ use crate::{persist, App, ConfigState};
 
 pub async fn list(State(app): State<Arc<App>>) -> Response {
     let cfg = app.config.lock().await;
-    payload(&app, &cfg).into_response()
+    Json(payload(&app, &cfg)).into_response()
 }
 
 /// The header's refresh button: ask models.dev again, so its vendor list and
@@ -115,7 +115,7 @@ fn host_of(url: &str) -> String {
         Ok(u) => match (u.host_str(), u.port()) {
             (Some(h), Some(port)) => format!("{h}:{port}"),
             (Some(h), None) => h.to_owned(),
-            None => String::new(),
+            (None, _) => String::new(),
         },
         Err(_) => String::new(),
     }

@@ -114,12 +114,19 @@ async fn provider_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &
             Ok::<_, reqwest::Error>(serde_json::from_str::<serde_json::Value>(&body).expect("api answer is json"))
         }
     };
+    let get_json = |url: String| {
+        let client = client.clone();
+        async move {
+            let body = client.get(url).send().await?.text().await?;
+            Ok::<_, reqwest::Error>(serde_json::from_str::<serde_json::Value>(&body).expect("api answer is json"))
+        }
+    };
     let save_body = serde_json::json!({
         "id": "e2e", "new": true, "name": "E2E Vendor", "api": "openai",
         "chat": format!("http://{mock_addr}/v1"), "key": "sk-test-1234",
         "models": ["alpha", "beta"], "headers": { "x-extra": "1" },
     });
-    let saved = get_json_raw(&post("/api/provider/save", save_body.to_string()).await.unwrap());
+    let saved = get_json_raw(post("/api/provider/save", save_body.to_string()).await.unwrap()).await;
     let listed = get_json(format!("{gateway}/api/providers")).await.unwrap();
 
     let sent_body = r#"{"model":"alpha","messages":[{"role":"user","content":"hi"}]}"#;
@@ -133,9 +140,9 @@ async fn provider_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &
         .unwrap();
     let c = captured.lock().unwrap().clone();
 
-    let fetched = get_json_raw(&post("/api/provider/models", serde_json::json!({"id": "e2e"}).to_string()).await.unwrap());
+    let fetched = get_json_raw(post("/api/provider/models", serde_json::json!({"id": "e2e"}).to_string()).await.unwrap()).await;
     let after_fetch = get_json(format!("{gateway}/api/providers")).await.unwrap();
-    let deleted = get_json_raw(&post("/api/provider/delete", serde_json::json!({"id": "e2e"}).to_string()).await.unwrap());
+    let deleted = get_json_raw(post("/api/provider/delete", serde_json::json!({"id": "e2e"}).to_string()).await.unwrap()).await;
 
     vec![
         check("a provider added in the UI is listed back", (saved["providers"][0]["id"] == serde_json::json!("e2e")
@@ -163,9 +170,9 @@ async fn provider_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &
 }
 
 /// api answers arrive as json bodies (or json errors the page can show)
-fn get_json_raw(res: reqwest::Response) -> serde_json::Value {
+async fn get_json_raw(res: reqwest::Response) -> serde_json::Value {
     let status = res.status();
-    let text = res.text().unwrap_or_default();
+    let text = res.text().await.unwrap_or_default();
     serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "error": text, "status": status.as_u16() }))
 }
 
