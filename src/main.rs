@@ -136,8 +136,6 @@ fn run_window(url: &str) {
             *control_flow = ControlFlow::Exit;
         }
     });
-    // if the event loop ever hands control back, the window is gone: end the app
-    std::process::exit(0)
 }
 
 /// The UI when the path is one of its files, a JSON 404 for the shell's

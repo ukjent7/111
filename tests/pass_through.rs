@@ -89,7 +89,7 @@ async fn run_checks() -> Vec<Check> {
 fn config_scenario(config: &Path, mock_addr: &str) -> Vec<Check> {
     let saved = std::fs::read(config)
         .ok()
-        .and_then(|bytes| serde_json::from_str::<serde_json::Value>(&bytes).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|v| v["upstream"].as_str().map(str::to_owned));
     let expected = format!("http://{mock_addr}");
     vec![check("the provider setting is remembered for the next launch", (saved.as_deref() == Some(expected.as_str()))
