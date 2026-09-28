@@ -81,7 +81,7 @@ fn enrich(p: &Value, catalog: &Value) -> Value {
     let local = matches!(out["host"].as_str().unwrap_or(""), "127.0.0.1" | "localhost" | "[::1]" | "0.0.0.0");
     out["ready"] = json!(key.is_empty() && local);
     out["agents"] = json!([]);
-    out["models"] = merge_models(p["models"].as_array(), &[]);
+    out["models"] = normalize_models(&p["models"]);
     let names = p["catalog"]
         .as_str()
         .and_then(|id| catalog.get(id))
@@ -474,6 +474,25 @@ async fn tiny_request(client: &reqwest::Client, proto: Proto, base: &str, key: &
             out
         }
         Err(e) => json!({ "ok": false, "error": e.to_string(), "model": model }),
+    }
+}
+
+/// Models may be stored as bare id strings (a hand-edited config); make them
+/// objects without touching their on flags.
+fn normalize_models(models: &Value) -> Value {
+    match models.as_array() {
+        Some(arr) => Value::Array(
+            arr.iter()
+                .map(|m| {
+                    if let Some(id) = m.as_str() {
+                        json!({ "id": id, "on": true })
+                    } else {
+                        m.clone()
+                    }
+                })
+                .collect(),
+        ),
+        None => json!([]),
     }
 }
 

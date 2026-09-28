@@ -152,7 +152,7 @@ async fn provider_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &
             && listed["presets"].is_array())
         .then(|| format!("{} preset tiles, gateway serves {} models", listed["presets"].as_array().map(|p| p.len()).unwrap_or(0), saved["gateway"]["models"]))
         .ok_or_else(|| format!("saved: {saved}, listed: {listed}"))),
-        check("requests route through the provider, with its key", (c.path == "/chat/completions"
+        check("requests route through the provider, with its key", (c.path == "/v1/chat/completions"
             && c.headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer sk-test-1234")
             && c.headers.get("x-extra").and_then(|v| v.to_str().ok()) == Some("1")
             && c.body == sent_body.as_bytes())
