@@ -81,12 +81,18 @@ try {
   // settings opens from the gear, not from the nav
   await page.click('#prefs', { timeout: 5000 }).catch((e) => errors.push(`click settings: ${e.message}`));
   await page.waitForTimeout(800);
-  // the add sheet: the user's own Custom tile first, then the vendors
+  // the add sheet: the user's own Custom tile first, then the vendors.
+  // with no provider configured the sheet is already open (and its button
+  // hidden), so only click when the button is there to click
   await page.click('#nav button:has-text("Providers")');
-  await page.click('#addProvider', { timeout: 5000 }).catch((e) => errors.push(`click add provider: ${e.message}`));
-  await page.waitForTimeout(600);
+  const addBtn = await page.$('#addProvider');
+  if (addBtn && (await addBtn.isVisible())) {
+    await addBtn.click();
+    await page.waitForTimeout(600);
+  }
   const first = await page.textContent('#addSheet .tiles .tile .n').catch(() => null);
   if (first !== 'Custom') errors.push(`first add-sheet tile is "${first}", expected "Custom"`);
+  await page.keyboard.press('Escape');
   await browser.close();
 
   const report = { tabs: 6, customTileFirst: first === 'Custom', errors, passed: errors.length === 0 && brand === 'magpie' };

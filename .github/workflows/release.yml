@@ -33,6 +33,10 @@ jobs:
           toolchain: 1.98.1
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
       # the E2E suite drives the same release binary that gets shipped
       - run: cargo test --release
       - run: cargo build --release

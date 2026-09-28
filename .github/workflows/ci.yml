@@ -21,6 +21,10 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
       - run: cargo test
       # the JSON-shape e2e can't see the page: drive the real UI in a real
       # browser and fail on any uncaught script error, on every tab
