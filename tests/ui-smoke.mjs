@@ -32,11 +32,19 @@ const connected = (port) =>
 
 const port = await freePort();
 const config = path.join(os.tmpdir(), `magpie-ui-smoke-${process.pid}.json`);
-const gateway = spawn(bin, ['--listen', `127.0.0.1:${port}`, '--config', config, '--no-window'], { stdio: 'ignore' });
+const gateway = spawn(bin, ['--listen', `127.0.0.1:${port}`, '--config', config, '--no-window']);
+let stderr = '';
+let exit = '';
+gateway.stderr.on('data', (d) => (stderr += d));
+gateway.on('error', (e) => (exit += `spawn error: ${e.message}`));
+gateway.on('exit', (code, signal) => (exit += `exited code=${code} signal=${signal}`));
 try {
   let up = false;
-  for (let i = 0; i < 150 && !up; i++) up = await connected(port);
-  if (!up) throw new Error('gateway never became ready');
+  for (let i = 0; i < 150 && !up; i++) {
+    if (exit) break; // died on its feet — report why instead of timing out
+    up = await connected(port);
+  }
+  if (!up) throw new Error(`gateway never became ready\n${exit}\n${stderr.slice(-2000)}`);
 
   const errors = [];
   const browser = await chromium.launch();
