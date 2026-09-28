@@ -6,13 +6,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::State;
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::{json, Value};
+use axum::extract::State;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use serde_json::{Value, json};
 
-use crate::{persist, App, ConfigState};
+use crate::{App, ConfigState, persist};
 
 // ---------- the payload the UI renders ----------
 
@@ -29,7 +29,10 @@ pub async fn sync(State(app): State<Arc<App>>) -> Response {
             *app.catalog.lock().unwrap() = v;
             Json(json!({ "agents": [], "profiles": [], "settings": {} })).into_response()
         }
-        Err(e) => err(StatusCode::BAD_GATEWAY, &format!("models.dev didn't answer: {e}")),
+        Err(e) => err(
+            StatusCode::BAD_GATEWAY,
+            &format!("models.dev didn't answer: {e}"),
+        ),
     }
 }
 
@@ -46,7 +49,10 @@ pub async fn fetch_catalog(client: &reqwest::Client) -> anyhow::Result<Value> {
 
 /// A vendor's models.dev logo, fetched on first use and cached (a miss is
 /// cached too, so a vendor without a logo costs one request per run).
-pub async fn icon(State(app): State<Arc<App>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+pub async fn icon(
+    State(app): State<Arc<App>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
     let hit = {
         let cache = app.logos.lock().unwrap();
         cache.get(&id).cloned()
@@ -84,9 +90,22 @@ pub fn payload(app: &App, cfg: &ConfigState) -> Value {
     let providers: Vec<Value> = cfg.providers.iter().map(|p| enrich(p, &catalog)).collect();
     let models: usize = providers
         .iter()
-        .map(|p| p["models"].as_array().map(|m| m.iter().filter(|m| m["on"] == json!(true)).count()).unwrap_or(0))
+        .map(|p| {
+            p["models"]
+                .as_array()
+                .map(|m| m.iter().filter(|m| m["on"] == json!(true)).count())
+                .unwrap_or(0)
+        })
         .sum();
-    let calls: Vec<Value> = app.gateway.calls.lock().unwrap().iter().rev().cloned().collect();
+    let calls: Vec<Value> = app
+        .gateway
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .cloned()
+        .collect();
     json!({
         "providers": providers,
         "presets": presets(&catalog),
@@ -113,7 +132,10 @@ fn enrich(p: &Value, catalog: &Value) -> Value {
         .find_map(|f| p[f].as_str())
         .unwrap_or("");
     out["host"] = json!(host_of(host));
-    let local = matches!(out["host"].as_str().unwrap_or(""), "127.0.0.1" | "localhost" | "[::1]" | "0.0.0.0");
+    let local = matches!(
+        out["host"].as_str().unwrap_or(""),
+        "127.0.0.1" | "localhost" | "[::1]" | "0.0.0.0"
+    );
     out["ready"] = json!(key.is_empty() && local);
     out["agents"] = json!([]);
     out["models"] = normalize_models(&p["models"]);
@@ -141,7 +163,11 @@ fn mask(key: &str) -> String {
     match chars.len() {
         0 => String::new(),
         n @ 1..=8 => "•".repeat(n),
-        n => format!("{}…{}", chars[..4].iter().collect::<String>(), chars[n - 4..].iter().collect::<String>()),
+        n => format!(
+            "{}…{}",
+            chars[..4].iter().collect::<String>(),
+            chars[n - 4..].iter().collect::<String>()
+        ),
     }
 }
 
@@ -213,7 +239,11 @@ fn err(status: StatusCode, msg: &str) -> Response {
 }
 
 pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
-    let Some(id) = body["id"].as_str().map(str::to_owned).filter(|s| !s.is_empty()) else {
+    let Some(id) = body["id"]
+        .as_str()
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty())
+    else {
         return err(StatusCode::BAD_REQUEST, "the provider needs an id");
     };
     let mut cfg = app.config.lock().await;
@@ -223,7 +253,9 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
         .providers
         .iter()
         .position(|p| p["id"].as_str() == Some(body["from"].as_str().unwrap_or(&id)));
-    let mut rec = pos.and_then(|i| cfg.providers.get(i).cloned()).unwrap_or_else(|| json!({}));
+    let mut rec = pos
+        .and_then(|i| cfg.providers.get(i).cloned())
+        .unwrap_or_else(|| json!({}));
     rec["id"] = json!(id);
     if let Some(v) = body["name"].as_str() {
         rec["name"] = json!(v);
@@ -231,7 +263,18 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     if rec["name"].as_str().unwrap_or("").is_empty() {
         rec["name"] = rec["id"].clone();
     }
-    for f in ["preset", "api", "chat", "responses", "anthropic", "catalog", "icon", "balanceURL", "balancePath", "modelsURL"] {
+    for f in [
+        "preset",
+        "api",
+        "chat",
+        "responses",
+        "anthropic",
+        "catalog",
+        "icon",
+        "balanceURL",
+        "balancePath",
+        "modelsURL",
+    ] {
         if let Some(v) = body[f].as_str() {
             rec[f] = json!(v);
         }
@@ -256,7 +299,11 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     }
     let chosen: Vec<String> = body["models"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     if body["models"].is_array() {
         rec["models"] = merge_models(rec["models"].as_array(), &chosen);
@@ -266,7 +313,10 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
         None => cfg.providers.push(rec),
     }
     if let Err(e) = persist(&app.config_path, &cfg) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("could not save the config: {e}"));
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("could not save the config: {e}"),
+        );
     }
     Json(payload(&app, &cfg)).into_response()
 }
@@ -278,14 +328,21 @@ pub async fn delete(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Res
     let mut cfg = app.config.lock().await;
     cfg.providers.retain(|p| p["id"].as_str() != Some(id));
     if let Err(e) = persist(&app.config_path, &cfg) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("could not save the config: {e}"));
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("could not save the config: {e}"),
+        );
     }
     Json(payload(&app, &cfg)).into_response()
 }
 
 pub async fn reveal_key(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
     let cfg = app.config.lock().await;
-    match cfg.providers.iter().find(|p| p["id"].as_str() == Some(body["id"].as_str().unwrap_or(""))) {
+    match cfg
+        .providers
+        .iter()
+        .find(|p| p["id"].as_str() == Some(body["id"].as_str().unwrap_or("")))
+    {
         Some(p) => Json(json!({ "key": p["key"].as_str().unwrap_or("") })).into_response(),
         None => err(StatusCode::NOT_FOUND, "no such provider"),
     }
@@ -313,10 +370,17 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
                     .map(|s| format!("{}/v1/models", s.trim_end_matches('/')))
             })
             .unwrap_or_default();
-        (base, p["key"].as_str().unwrap_or("").to_owned(), p["anthropic"].as_str().is_some_and(|s| !s.is_empty()))
+        (
+            base,
+            p["key"].as_str().unwrap_or("").to_owned(),
+            p["anthropic"].as_str().is_some_and(|s| !s.is_empty()),
+        )
     };
     if base.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "this provider has no URL to list models from");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "this provider has no URL to list models from",
+        );
     }
     let mut req = app.client.get(&base);
     if anthropic {
@@ -329,15 +393,28 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
     }
     let res = match req.send().await {
         Ok(res) => res,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("the vendor didn't answer: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                &format!("the vendor didn't answer: {e}"),
+            );
+        }
     };
     if !res.status().is_success() {
-        return err(StatusCode::BAD_GATEWAY, &format!("the vendor answered {}", res.status()));
+        return err(
+            StatusCode::BAD_GATEWAY,
+            &format!("the vendor answered {}", res.status()),
+        );
     }
     let text = res.text().await.unwrap_or_default();
     let list: Value = match serde_json::from_str(&text) {
         Ok(v) => v,
-        Err(_) => return err(StatusCode::BAD_GATEWAY, "the vendor's model list is not JSON"),
+        Err(_) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "the vendor's model list is not JSON",
+            );
+        }
     };
     let ids: Vec<String> = list
         .get("data")
@@ -345,7 +422,12 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(|m| m["id"].as_str().or_else(|| m["name"].as_str()).map(str::to_owned))
+                .filter_map(|m| {
+                    m["id"]
+                        .as_str()
+                        .or_else(|| m["name"].as_str())
+                        .map(str::to_owned)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -354,11 +436,18 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
     }
     {
         let mut cfg = app.config.lock().await;
-        if let Some(p) = cfg.providers.iter_mut().find(|p| p["id"].as_str() == Some(&id)) {
+        if let Some(p) = cfg
+            .providers
+            .iter_mut()
+            .find(|p| p["id"].as_str() == Some(&id))
+        {
             p["models"] = merge_models(p["models"].as_array(), &ids);
         }
         if let Err(e) = persist(&app.config_path, &cfg) {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("could not save the config: {e}"));
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("could not save the config: {e}"),
+            );
         }
     }
     (StatusCode::OK, Json(json!({ "count": ids.len() }))).into_response()
@@ -373,14 +462,21 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     };
     let provider = {
         let cfg = app.config.lock().await;
-        cfg.providers.iter().find(|p| p["id"].as_str() == Some(&id)).cloned()
+        cfg.providers
+            .iter()
+            .find(|p| p["id"].as_str() == Some(&id))
+            .cloned()
     };
     let Some(p) = provider else {
         return err(StatusCode::NOT_FOUND, "no such provider");
     };
     let per_model: Vec<String> = body["test"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     let results: Vec<Value> = if per_model.is_empty() {
         let fallback = p["models"]
@@ -390,13 +486,23 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
             .unwrap_or("test")
             .to_owned();
         let mut out = Vec::new();
-        for (name, field, proto) in
-            [("chat", "chat", Proto::Chat), ("responses", "responses", Proto::Responses), ("anthropic", "anthropic", Proto::Anthropic)]
-        {
+        for (name, field, proto) in [
+            ("chat", "chat", Proto::Chat),
+            ("responses", "responses", Proto::Responses),
+            ("anthropic", "anthropic", Proto::Anthropic),
+        ] {
             match p[field].as_str().filter(|s| !s.is_empty()) {
-                None => out.push(json!({ "protocol": name, "ok": false, "error": "no URL for this API" })),
+                None => out
+                    .push(json!({ "protocol": name, "ok": false, "error": "no URL for this API" })),
                 Some(base) => {
-                    let mut r = tiny_request(&app.client, proto, base, p["key"].as_str().unwrap_or(""), &fallback).await;
+                    let mut r = tiny_request(
+                        &app.client,
+                        proto,
+                        base,
+                        p["key"].as_str().unwrap_or(""),
+                        &fallback,
+                    )
+                    .await;
                     r["protocol"] = json!(name);
                     out.push(r);
                 }
@@ -406,7 +512,10 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     } else {
         let proto = api_proto(&p);
         let Some(base) = url_for(&p, proto).filter(|s| !s.is_empty()) else {
-            return err(StatusCode::BAD_REQUEST, "this provider has no URL for its own API");
+            return err(
+                StatusCode::BAD_REQUEST,
+                "this provider has no URL for its own API",
+            );
         };
         let key = p["key"].as_str().unwrap_or("");
         let mut out = Vec::new();
@@ -430,7 +539,9 @@ fn api_proto(p: &Value) -> Proto {
         Some("responses") => Proto::Responses,
         Some("anthropic") => Proto::Anthropic,
         _ => {
-            if p["anthropic"].as_str().is_some_and(|s| !s.is_empty()) && p["chat"].as_str().is_none_or(|s| s.is_empty()) {
+            if p["anthropic"].as_str().is_some_and(|s| !s.is_empty())
+                && p["chat"].as_str().is_none_or(|s| s.is_empty())
+            {
                 Proto::Anthropic
             } else {
                 Proto::Chat
@@ -448,7 +559,13 @@ fn url_for(p: &Value, proto: Proto) -> Option<&str> {
     p[field].as_str().filter(|s| !s.is_empty())
 }
 
-async fn tiny_request(client: &reqwest::Client, proto: Proto, base: &str, key: &str, model: &str) -> Value {
+async fn tiny_request(
+    client: &reqwest::Client,
+    proto: Proto,
+    base: &str,
+    key: &str,
+    model: &str,
+) -> Value {
     let t0 = Instant::now();
     let url = match proto {
         Proto::Anthropic => format!("{}/v1/messages", base.trim_end_matches('/')),
@@ -461,10 +578,15 @@ async fn tiny_request(client: &reqwest::Client, proto: Proto, base: &str, key: &
         }
         Proto::Responses => json!({ "model": model, "input": "hi", "max_output_tokens": 1 }).to_string(),
     };
-    let mut req = client.post(&url).header(header::CONTENT_TYPE, "application/json").body(body);
+    let mut req = client
+        .post(&url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body);
     if !key.is_empty() {
         req = match proto {
-            Proto::Anthropic => req.header("x-api-key", key).header("anthropic-version", "2023-06-01"),
+            Proto::Anthropic => req
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01"),
             _ => req.header(header::AUTHORIZATION, format!("Bearer {key}")),
         };
     }
@@ -509,7 +631,10 @@ fn merge_models(existing: Option<&Vec<Value>>, on: &[String]) -> Value {
         m["on"] = json!(false);
     }
     for id in on {
-        match out.iter_mut().find(|m| m["id"].as_str() == Some(id.as_str())) {
+        match out
+            .iter_mut()
+            .find(|m| m["id"].as_str() == Some(id.as_str()))
+        {
             Some(m) => m["on"] = json!(true),
             None => out.push(json!({ "id": id, "on": true })),
         }
@@ -537,7 +662,10 @@ pub fn route_for(cfg: &ConfigState, path_and_query: &str) -> Option<Target> {
     let (field, sub) = if path.starts_with("/v1/messages") || path.starts_with("/v1/complete") {
         ("anthropic", path.to_owned())
     } else if path.contains("/responses") {
-        ("responses", path.strip_prefix("/v1").unwrap_or(path).to_owned())
+        (
+            "responses",
+            path.strip_prefix("/v1").unwrap_or(path).to_owned(),
+        )
     } else {
         ("chat", path.strip_prefix("/v1").unwrap_or(path).to_owned())
     };

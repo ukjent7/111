@@ -7,16 +7,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use reqwest::redirect::Policy;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
 mod providers;
@@ -50,18 +50,37 @@ pub struct App {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let (mut listen, mut upstream, mut window, mut config_flag) = (None, None, true, None);
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
-            "--listen" => listen = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
-            "--upstream" => upstream = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
-            "--config" => config_flag = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
+            "--listen" => {
+                listen = Some(
+                    args.next()
+                        .with_context(|| format!("flag {flag} needs a value"))?,
+                )
+            }
+            "--upstream" => {
+                upstream = Some(
+                    args.next()
+                        .with_context(|| format!("flag {flag} needs a value"))?,
+                )
+            }
+            "--config" => {
+                config_flag = Some(
+                    args.next()
+                        .with_context(|| format!("flag {flag} needs a value"))?,
+                )
+            }
             "--no-window" => window = false,
-            other => bail!("unknown argument {other:?}; usage: magpie-gateway [--listen <addr>] [--upstream <url>] [--config <path>] [--no-window]"),
+            other => bail!(
+                "unknown argument {other:?}; usage: magpie-gateway [--listen <addr>] [--upstream <url>] [--config <path>] [--no-window]"
+            ),
         }
     }
 
@@ -87,7 +106,11 @@ fn main() -> Result<()> {
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .build()?;
-    let role = if cfg.upstream.is_empty() { ", no provider configured yet".to_owned() } else { format!(", raw upstream {}", cfg.upstream) };
+    let role = if cfg.upstream.is_empty() {
+        ", no provider configured yet".to_owned()
+    } else {
+        format!(", raw upstream {}", cfg.upstream)
+    };
     let app = Arc::new(App {
         client,
         config: tokio::sync::Mutex::new(cfg),
@@ -122,7 +145,9 @@ fn main() -> Result<()> {
 
     // the gateway serves from background threads; the desktop window owns the
     // main thread (a requirement on macOS), and closing it ends the process
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     {
         // models.dev in the background: the Providers tab wants its vendor list
         let app = app.clone();
@@ -165,7 +190,11 @@ fn run_window(url: &str) {
         .expect("webview");
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
+        if let Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } = event
+        {
             *control_flow = ControlFlow::Exit;
         }
     });
@@ -178,7 +207,11 @@ async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
     let name = req.uri().path().trim_start_matches('/');
     if let Some(file) = UI.get_file(if name.is_empty() { "index.html" } else { name }) {
         let mime = mime_guess::from_path(file.path()).first_or_octet_stream();
-        return ([(header::CONTENT_TYPE, mime.as_ref().to_owned())], file.contents()).into_response();
+        return (
+            [(header::CONTENT_TYPE, mime.as_ref().to_owned())],
+            file.contents(),
+        )
+            .into_response();
     }
     if name == "favicon.ico" {
         if let Some(icon) = UI.get_file("icons/magpie.svg") {
@@ -186,7 +219,11 @@ async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
         }
     }
     if name == "api" || name.starts_with("api/") || name == "wails" || name.starts_with("wails/") {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "reserved by the shell" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "reserved by the shell" })),
+        )
+            .into_response();
     }
     proxy(State(app), req).await
 }
@@ -237,7 +274,9 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
             if !t.key.is_empty() {
                 if let Ok(v) = HeaderValue::from_str(&t.key) {
                     if t.anthropic {
-                        parts.headers.insert(HeaderName::from_static("x-api-key"), v);
+                        parts
+                            .headers
+                            .insert(HeaderName::from_static("x-api-key"), v);
                     } else if let Ok(bearer) = HeaderValue::from_str(&format!("Bearer {}", t.key)) {
                         parts.headers.insert(header::AUTHORIZATION, bearer);
                     }
@@ -245,9 +284,10 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
             }
             if let Some(extra) = t.extra.as_object() {
                 for (name, value) in extra {
-                    if let (Ok(name), Ok(value)) =
-                        (HeaderName::try_from(name.as_str()), HeaderValue::try_from(value.as_str().unwrap_or_default()))
-                    {
+                    if let (Ok(name), Ok(value)) = (
+                        HeaderName::try_from(name.as_str()),
+                        HeaderValue::try_from(value.as_str().unwrap_or_default()),
+                    ) {
                         parts.headers.insert(name, value);
                     }
                 }
@@ -265,7 +305,14 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
         Ok(res) => res,
         Err(err) => {
             tracing::warn!(%method, %path, error = %err, "upstream request failed");
-            record(&app, &path, &to, StatusCode::BAD_GATEWAY, started, Some(err.to_string()));
+            record(
+                &app,
+                &path,
+                &to,
+                StatusCode::BAD_GATEWAY,
+                started,
+                Some(err.to_string()),
+            );
             return (StatusCode::BAD_GATEWAY, format!("magpie: {err}")).into_response();
         }
     };
@@ -284,7 +331,14 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     res
 }
 
-fn record(app: &App, path: &str, to: &str, status: StatusCode, started: Instant, error: Option<String>) {
+fn record(
+    app: &App,
+    path: &str,
+    to: &str,
+    status: StatusCode,
+    started: Instant,
+    error: Option<String>,
+) {
     app.gateway.requests.fetch_add(1, Ordering::Relaxed);
     if status.is_client_error() || status.is_server_error() {
         app.gateway.errors.fetch_add(1, Ordering::Relaxed);
@@ -339,7 +393,11 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     let listed: Vec<HeaderName> = headers
         .get(header::CONNECTION)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').filter_map(|name| name.trim().parse().ok()).collect())
+        .map(|v| {
+            v.split(',')
+                .filter_map(|name| name.trim().parse().ok())
+                .collect()
+        })
         .unwrap_or_default();
     for name in listed {
         headers.remove(&name);
@@ -365,8 +423,11 @@ fn config_path(flag: Option<&str>) -> Result<PathBuf> {
         return Ok(path.into());
     }
     let base = match std::env::consts::OS {
-        "windows" => std::env::var_os("APPDATA").map(PathBuf::from).context("APPDATA is not set")?,
-        "macos" => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join("Library/Application Support"),
+        "windows" => std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .context("APPDATA is not set")?,
+        "macos" => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
+            .join("Library/Application Support"),
         _ => std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
@@ -376,7 +437,9 @@ fn config_path(flag: Option<&str>) -> Result<PathBuf> {
 }
 
 fn load_config(path: &Path) -> ConfigState {
-    let saved = std::fs::read(path).ok().map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap_or_default());
+    let saved = std::fs::read(path)
+        .ok()
+        .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap_or_default());
     let field = |key: &str| {
         saved
             .as_ref()
