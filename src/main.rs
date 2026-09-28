@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
 /// The UI when the path is one of its files, a JSON 404 for unknown API
 /// calls (never forwarded upstream), and lossless pass-through for the rest.
 async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
-    let name = req.uri.path().trim_start_matches('/');
+    let name = req.uri().path().trim_start_matches('/');
     if let Some(file) = UI.get_file(if name.is_empty() { "index.html" } else { name }) {
         let mime = mime_guess::from_path(file.path()).first_or_octet_stream();
         return ([(header::CONTENT_TYPE, mime.as_ref().to_owned())], file.contents()).into_response();
@@ -203,7 +203,7 @@ async fn api_providers(State(app): State<Arc<App>>) -> impl IntoResponse {
 
 async fn api_trace(State(app): State<Arc<App>>, req: Request) -> impl IntoResponse {
     // the routing view long-polls: holding the answer here is its heartbeat
-    if req.uri.query().is_some_and(|q| q.contains("wait=1")) {
+    if req.uri().query().is_some_and(|q| q.contains("wait=1")) {
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
     let g = &app.gateway;

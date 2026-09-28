@@ -260,7 +260,8 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
         headers: parts.headers.clone(),
     };
 
-    match parts.uri.path() {
+    // every mock answer is marked, so a check can prove a request never got here
+    let mut res = match parts.uri.path() {
         "/v1/chat/completions" => Response::builder()
             .header("content-type", "text/event-stream")
             .header("x-request-id", "upstream-42")
@@ -277,19 +278,10 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
             .body(Body::from("slow down"))
             .unwrap(),
         _ => Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap(),
-    }
-    .tap_mock()
+    };
+    res.headers_mut().insert("x-mock-upstream", HeaderValue::from_static("1"));
+    res
 }
-
-/// Marks every mock answer, so a check can prove a request never got here.
-trait TapMock: Sized {
-    fn tap_mock(self) -> Response {
-        let mut res = self;
-        res.headers_mut().insert("x-mock-upstream", HeaderValue::from_static("1"));
-        res
-    }
-}
-impl TapMock for Response {}
 
 /// chunk 1, a 400 ms silence, chunk 2, done — timed so buffering shows.
 fn sse_body() -> Body {
