@@ -21,6 +21,7 @@ concurrency:
 jobs:
   upgrade:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Install Linux GUI build deps

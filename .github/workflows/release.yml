@@ -16,6 +16,7 @@ permissions:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -42,8 +43,11 @@ jobs:
   # the publish matrix below only builds and tests.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install Linux GUI build deps
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -60,6 +64,7 @@ jobs:
   build:
     needs: [tag, lint]
     if: needs.tag.outputs.tag != ''
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +92,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ matrix.target }}
+          # nothing downstream runs `cargo install`, so the reinstallable
+          # binaries are dead weight in the cache; and rust-cache's bin
+          # caching is known to misbehave on Windows (#341)
+          cache-bin: "false"
       # the E2E suite drives the same release binary that gets shipped
       - run: cargo test --release
       - run: cargo build --release

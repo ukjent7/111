@@ -14,6 +14,15 @@ concurrency:
   # commits land on main, and a full 3-platform matrix each time is waste
   cancel-in-progress: true
 
+env:
+  # CI never needs a full DWARF dump, only backtraces that name a file and a
+  # line. Dropping the rest makes every compile faster and shrinks target/
+  # enough to cut the cache upload, which is the slowest part of the Windows
+  # leg. Only the dev profile (and `test`, which inherits it) is affected —
+  # the release profile has debug info off already, so shipped binaries are
+  # byte-for-byte unaffected.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
   # clippy and `cargo test` produce different artifacts, so running both on
   # every platform compiles all dependencies twice. Nothing in this crate is
@@ -22,8 +31,11 @@ jobs:
   # failure should not buy three more minutes of compiling.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install Linux GUI build deps
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -41,6 +53,7 @@ jobs:
 
   e2e:
     needs: lint
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +61,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install Linux GUI build deps
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
@@ -55,6 +70,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: e2e-${{ matrix.os }}
+          # rust-cache's bin caching is known to misbehave on Windows
+          # (Swatinem/rust-cache#341), and nothing here reinstalls the binary
+          cache-bin: "false"
       - run: cargo test
       # the JSON-shape e2e can't see the page: drive the real UI in a real
       # browser and fail on any uncaught script error, on every tab
