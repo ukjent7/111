@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .fallback(proxy)
         .layer(DefaultBodyLimit::disable())
-        .with_state((client, upstream));
+        .with_state((client, upstream.clone()));
 
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("listening on http://{listen}, passing everything through to {upstream}");
@@ -111,7 +111,7 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
     for name in [
         header::CONNECTION,
-        header::KEEP_ALIVE,
+        HeaderName::from_static("keep-alive"),
         header::PROXY_AUTHENTICATE,
         header::PROXY_AUTHORIZATION,
         header::TE,

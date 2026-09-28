@@ -240,7 +240,7 @@ fn sse_body() -> Body {
 }
 
 fn spawn_gateway(gateway: SocketAddr, mock: SocketAddr) -> Gateway {
-    let child = Command::new(env!("CARGO_BIN_EXE_magpie-gateway"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_magpie-gateway"))
         .arg("--listen")
         .arg(gateway.to_string())
         .arg("--upstream")
