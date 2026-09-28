@@ -1,0 +1,25 @@
+name: fmt
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - run: cargo fmt
+      - name: Commit the formatted sources
+        run: |
+          git config user.name "ukjent7"
+          git config user.email "162427564+ukjent7@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "cargo fmt"
+          git push
