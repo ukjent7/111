@@ -74,10 +74,13 @@ try {
   await page.goto(`http://127.0.0.1:${port}/?shell=1`, { waitUntil: 'load' });
   await page.waitForTimeout(1500);
   const brand = await page.textContent('.brand span:last-child');
-  for (const tab of ['Providers', 'Gateway', 'Routing', 'Usage', 'Settings', 'Agents']) {
+  for (const tab of ['Providers', 'Gateway', 'Routing', 'Usage', 'Library', 'Agents']) {
     await page.click(`#nav button:has-text("${tab}")`, { timeout: 5000 }).catch((e) => errors.push(`click ${tab}: ${e.message}`));
     await page.waitForTimeout(800);
   }
+  // settings opens from the gear, not from the nav
+  await page.click('#prefs', { timeout: 5000 }).catch((e) => errors.push(`click settings: ${e.message}`));
+  await page.waitForTimeout(800);
   await browser.close();
 
   const report = { tabs: 6, errors, passed: errors.length === 0 && brand === 'magpie' };
