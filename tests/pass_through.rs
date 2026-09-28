@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Router;
 use futures::StreamExt;
@@ -74,6 +74,7 @@ async fn run_checks() -> Vec<Check> {
     checks.extend(sse_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
     checks.extend(binary_scenario(&client, &gateway).await);
     checks.extend(status_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
+    checks.extend(ui_scenario(&client, &gateway).await);
     drop(guard); // keep the child alive until every check ran
     checks
 }
@@ -185,8 +186,62 @@ async fn status_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &st
     ]
 }
 
-async fn spawn_mock(captured: Shared) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock upstream");
+/// The UI at the gateway root and the handful of /api calls the page needs to
+/// boot — plus proof that unknown api calls never leak to the upstream.
+async fn ui_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
+    let index = client.get(gateway).send().await.unwrap();
+    let index_headers = index.headers().clone();
+    let html = index.text().await.unwrap();
+    let boot = client.get(format!("{gateway}/boot.js")).send().await.unwrap();
+    let boot_headers = boot.headers().clone();
+    let get_json = |url: String| {
+        let client = client.clone();
+        async move {
+            let body = client.get(url).send().await?.text().await?;
+            Ok::<_, reqwest::Error>(serde_json::from_str::<serde_json::Value>(&body).expect("api answer is json"))
+        }
+    };
+    let state = get_json(format!("{gateway}/api/state")).await.unwrap();
+    let providers = get_json(format!("{gateway}/api/providers")).await.unwrap();
+    let trace = get_json(format!("{gateway}/api/gateway/trace?after=0")).await.unwrap();
+    let no_api = client.get(format!("{gateway}/api/nope")).send().await.unwrap();
+    let no_api_headers = no_api.headers().clone();
+
+    vec![
+        check("the UI is served at the gateway root", (html.contains("<title>magpie</title>")
+            && index_headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").starts_with("text/html"))
+        .then(|| format!("index.html, {} bytes", html.len()))
+        .ok_or_else(|| format!("content-type {index_headers:?}, {} bytes", html.len()))),
+        check("the UI's assets are served", (boot.status().is_success()
+            && boot_headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").contains("javascript"))
+        .then(|| format!("boot.js, {}", boot_headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("")))
+        .ok_or_else(|| format!("status {}, headers {boot_headers:?}", boot.status()))),
+        check("the UI boots from the api", (state["agents"].is_array()
+            && state["settings"].is_object()
+            && providers["gateway"]["running"] == serde_json::json!(true)
+            && providers["gateway"]["url"] == serde_json::json!(gateway)
+            && providers["gateway"]["calls"].is_array())
+        .then(|| "state and providers answer in the shapes the page reads".into())
+        .ok_or_else(|| format!("state {state}, providers {providers}"))),
+        check("the gateway's pass-through calls show in the UI", {
+            let calls = providers["gateway"]["calls"].as_array().unwrap();
+            (calls.len() >= 3 && calls.iter().any(|c| c["status"] == serde_json::json!(429)))
+                .then(|| format!("{} calls recorded", calls.len()))
+                .ok_or_else(|| format!("calls: {calls:?}"))
+        }),
+        check("the routing view hears the gateway", (trace["mine"] == serde_json::json!(true)
+            && trace["routes"].is_array()
+            && trace["totals"]["requests"].as_u64().unwrap_or(0) >= 3)
+        .then(|| format!("totals: {}", trace["totals"]))
+        .ok_or_else(|| format!("trace: {trace}"))),
+        check("unknown api calls never reach the upstream", (no_api.status() == StatusCode::NOT_FOUND
+            && !no_api_headers.contains_key("x-mock-upstream"))
+        .then(|| "404 from magpie itself".into())
+        .ok_or_else(|| format!("status {}, mock header {:?}", no_api.status(), no_api_headers.get("x-mock-upstream")))),
+    ]
+}
+
+async fn spawn_mock(captured: Shared) -> SocketAddr {    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock upstream");
     let addr = listener.local_addr().unwrap();
     let app = Router::new().fallback(mock).with_state(captured);
     tokio::spawn(async move { axum::serve(listener, app).await.expect("mock upstream serves") });
@@ -223,7 +278,18 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
             .unwrap(),
         _ => Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap(),
     }
+    .tap_mock()
 }
+
+/// Marks every mock answer, so a check can prove a request never got here.
+trait TapMock: Sized {
+    fn tap_mock(self) -> Response {
+        let mut res = self;
+        res.headers_mut().insert("x-mock-upstream", HeaderValue::from_static("1"));
+        res
+    }
+}
+impl TapMock for Response {}
 
 /// chunk 1, a 400 ms silence, chunk 2, done — timed so buffering shows.
 fn sse_body() -> Body {
@@ -245,6 +311,7 @@ fn spawn_gateway(gateway: SocketAddr, mock: SocketAddr) -> Gateway {
         .arg(gateway.to_string())
         .arg("--upstream")
         .arg(format!("http://{mock}"))
+        .arg("--no-open")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

@@ -1,14 +1,37 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Router;
+use axum::routing::get;
+use axum::{Json, Router};
+use include_dir::{include_dir, Dir};
 use reqwest::redirect::Policy;
+use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
+
+// the prepared UI, embedded so the binary alone is the whole desktop app
+static UI: Dir<'_> = include_dir!("ui-source");
+
+struct Gateway {
+    url: String,
+    requests: AtomicU64,
+    errors: AtomicU64,
+    calls: Mutex<VecDeque<Value>>,
+}
+
+struct App {
+    client: reqwest::Client,
+    upstream: String,
+    gateway: Gateway,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,14 +39,14 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let (mut listen, mut upstream) = (None, None);
+    let (mut listen, mut upstream, mut open) = (None, None, true);
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
-        let value = args.next().with_context(|| format!("flag {flag} needs a value"))?;
         match flag.as_str() {
-            "--listen" => listen = Some(value),
-            "--upstream" => upstream = Some(value),
-            other => bail!("unknown argument {other:?}; usage: magpie-gateway --listen <addr> --upstream <url>"),
+            "--listen" => listen = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
+            "--upstream" => upstream = Some(args.next().with_context(|| format!("flag {flag} needs a value"))?),
+            "--no-open" => open = false,
+            other => bail!("unknown argument {other:?}; usage: magpie-gateway --listen <addr> --upstream <url> [--no-open]"),
         }
     }
     let listen: SocketAddr = listen
@@ -40,20 +63,56 @@ async fn main() -> Result<()> {
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .build()?;
-    let app = Router::new()
-        .fallback(proxy)
+    let app = Arc::new(App {
+        client,
+        upstream,
+        gateway: Gateway {
+            url: format!("http://{listen}"),
+            requests: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            calls: Mutex::new(VecDeque::new()),
+        },
+    });
+    let router = Router::new()
+        .route("/api/state", get(api_state))
+        .route("/api/providers", get(api_providers))
+        .route("/api/gateway/trace", get(api_trace))
+        .route("/api/update", get(|| async { StatusCode::NO_CONTENT }))
+        .fallback(entry)
         .layer(DefaultBodyLimit::disable())
-        .with_state((client, upstream.clone()));
+        .with_state(app);
 
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!("listening on http://{listen}, passing everything through to {upstream}");
-    axum::serve(listener, app).await?;
+    tracing::info!("gateway listening on http://{listen} — UI at that address, everything else passes through to {}", app.upstream);
+    if open {
+        open_browser(&app.gateway.url);
+    }
+    axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// The UI when the path is one of its files, a JSON 404 for unknown API
+/// calls (never forwarded upstream), and lossless pass-through for the rest.
+async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
+    let name = req.uri.path().trim_start_matches('/');
+    if let Some(file) = UI.get_file(if name.is_empty() { "index.html" } else { name }) {
+        let mime = mime_guess::from_path(file.path()).first_or_octet_stream();
+        return ([(header::CONTENT_TYPE, mime.as_ref().to_owned())], file.contents()).into_response();
+    }
+    if name == "favicon.ico" {
+        if let Some(icon) = UI.get_file("icons/magpie.svg") {
+            return ([("content-type", "image/svg+xml")], icon.contents()).into_response();
+        }
+    }
+    if name == "api" || name.starts_with("api/") {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "no such api" }))).into_response();
+    }
+    proxy(State(app), req).await
 }
 
 /// Whatever arrives goes out unchanged: same method, path, query, headers and
 /// body bytes (streamed both ways, so SSE and big payloads never buffer).
-async fn proxy(State((client, upstream)): State<(reqwest::Client, String)>, req: Request) -> Response {
+async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     let started = Instant::now();
     let (mut parts, body) = req.into_parts();
     let path = parts
@@ -71,8 +130,8 @@ async fn proxy(State((client, upstream)): State<(reqwest::Client, String)>, req:
     parts.headers.remove(header::HOST);
     parts.headers.remove(header::CONTENT_LENGTH);
 
-    let url = format!("{}{}", upstream.trim_end_matches('/'), path);
-    let mut sent = client.request(parts.method, url).headers(parts.headers);
+    let url = format!("{}{}", app.upstream.trim_end_matches('/'), path);
+    let mut sent = app.client.request(parts.method, url).headers(parts.headers);
     if has_body {
         sent = sent.body(reqwest::Body::wrap_stream(body.into_data_stream()));
     }
@@ -81,6 +140,7 @@ async fn proxy(State((client, upstream)): State<(reqwest::Client, String)>, req:
         Ok(res) => res,
         Err(err) => {
             tracing::warn!(%method, %path, error = %err, "upstream request failed");
+            record(&app, &path, StatusCode::BAD_GATEWAY, started, Some(err.to_string()));
             return (StatusCode::BAD_GATEWAY, format!("magpie: {err}")).into_response();
         }
     };
@@ -94,8 +154,70 @@ async fn proxy(State((client, upstream)): State<(reqwest::Client, String)>, req:
         .body(body)
         .expect("status and stream body are always valid");
     *res.headers_mut() = headers;
+    record(&app, &path, status, started, None);
     tracing::info!(%method, %path, status = status.as_u16(), ms = started.elapsed().as_millis() as u64, "passed through");
     res
+}
+
+fn record(app: &App, path: &str, status: StatusCode, started: Instant, error: Option<String>) {
+    app.gateway.requests.fetch_add(1, Ordering::Relaxed);
+    if status.is_client_error() || status.is_server_error() {
+        app.gateway.errors.fetch_add(1, Ordering::Relaxed);
+    }
+    let call = json!({
+        "time": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
+        "model": "",
+        "from": path,
+        "to": path,
+        "status": status.as_u16(),
+        "ms": started.elapsed().as_millis() as u64,
+        "error": error,
+    });
+    let mut calls = app.gateway.calls.lock().unwrap();
+    calls.push_back(call);
+    while calls.len() > 50 {
+        calls.pop_front();
+    }
+}
+
+async fn api_state() -> impl IntoResponse {
+    Json(json!({ "agents": [], "profiles": [], "settings": {} }))
+}
+
+async fn api_providers(State(app): State<Arc<App>>) -> impl IntoResponse {
+    let g = &app.gateway;
+    let calls: Vec<Value> = g.calls.lock().unwrap().iter().rev().cloned().collect();
+    Json(json!({
+        "providers": [],
+        "presets": [],
+        "gateway": {
+            "running": true,
+            "mine": true,
+            "url": g.url,
+            "models": 0,
+            "groups": [],
+            "calls": calls,
+        },
+    }))
+}
+
+async fn api_trace(State(app): State<Arc<App>>, req: Request) -> impl IntoResponse {
+    // the routing view long-polls: holding the answer here is its heartbeat
+    if req.uri.query().is_some_and(|q| q.contains("wait=1")) {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    let g = &app.gateway;
+    Json(json!({
+        "now": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
+        "mine": true,
+        "seq": 0,
+        "routes": [],
+        "totals": {
+            "requests": g.requests.load(Ordering::Relaxed),
+            "rerouted": 0,
+            "errors": g.errors.load(Ordering::Relaxed),
+        },
+    }))
 }
 
 /// Hop-by-hop headers describe one connection, never the message; anything the
@@ -121,4 +243,25 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     ] {
         headers.remove(name);
     }
+}
+
+fn open_browser(url: &str) {
+    let mut cmd = match std::env::consts::OS {
+        "windows" => {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "start", "", url]);
+            c
+        }
+        "macos" => {
+            let mut c = Command::new("open");
+            c.arg(url);
+            c
+        }
+        _ => {
+            let mut c = Command::new("xdg-open");
+            c.arg(url);
+            c
+        }
+    };
+    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
