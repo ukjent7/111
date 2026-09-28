@@ -37,6 +37,9 @@ pub struct ConfigState {
     pub providers: Vec<Value>,
 }
 
+/// a vendor logo's bytes and content type, or its absence
+pub type Logo = Option<(Vec<u8>, String)>;
+
 pub struct App {
     pub client: reqwest::Client,
     pub config: tokio::sync::Mutex<ConfigState>,
@@ -44,7 +47,7 @@ pub struct App {
     /// models.dev's vendor catalog, fetched at startup and on Sync
     pub catalog: Mutex<Value>,
     /// vendor logos from models.dev, by id; a miss is remembered too
-    pub logos: Mutex<HashMap<String, Option<(Vec<u8>, String)>>>,
+    pub logos: Mutex<HashMap<String, Logo>>,
     pub gateway: Gateway,
 }
 
@@ -213,10 +216,10 @@ async fn entry(State(app): State<Arc<App>>, req: Request) -> Response {
         )
             .into_response();
     }
-    if name == "favicon.ico" {
-        if let Some(icon) = UI.get_file("icons/magpie.svg") {
-            return ([("content-type", "image/svg+xml")], icon.contents()).into_response();
-        }
+    if name == "favicon.ico"
+        && let Some(icon) = UI.get_file("icons/magpie.svg")
+    {
+        return ([("content-type", "image/svg+xml")], icon.contents()).into_response();
     }
     if name == "api" || name.starts_with("api/") || name == "wails" || name.starts_with("wails/") {
         return (
@@ -271,15 +274,15 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
         Some(Dest::Provider(t)) => {
             parts.headers.remove(header::AUTHORIZATION);
             parts.headers.remove("x-api-key");
-            if !t.key.is_empty() {
-                if let Ok(v) = HeaderValue::from_str(&t.key) {
-                    if t.anthropic {
-                        parts
-                            .headers
-                            .insert(HeaderName::from_static("x-api-key"), v);
-                    } else if let Ok(bearer) = HeaderValue::from_str(&format!("Bearer {}", t.key)) {
-                        parts.headers.insert(header::AUTHORIZATION, bearer);
-                    }
+            if !t.key.is_empty()
+                && let Ok(v) = HeaderValue::from_str(&t.key)
+            {
+                if t.anthropic {
+                    parts
+                        .headers
+                        .insert(HeaderName::from_static("x-api-key"), v);
+                } else if let Ok(bearer) = HeaderValue::from_str(&format!("Bearer {}", t.key)) {
+                    parts.headers.insert(header::AUTHORIZATION, bearer);
                 }
             }
             if let Some(extra) = t.extra.as_object() {
@@ -454,7 +457,7 @@ fn load_config(path: &Path) -> ConfigState {
             .as_ref()
             .and_then(|v| v.get("providers"))
             .and_then(Value::as_array)
-            .map(|a| a.clone())
+            .cloned()
             .unwrap_or_default(),
     }
 }

@@ -12,7 +12,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use crate::{App, ConfigState, persist};
+use crate::{App, ConfigState, Logo, persist};
 
 // ---------- the payload the UI renders ----------
 
@@ -71,15 +71,14 @@ pub async fn icon(
     }
 }
 
-async fn fetch_logo(client: &reqwest::Client, id: &str) -> Option<(Vec<u8>, String)> {
+async fn fetch_logo(client: &reqwest::Client, id: &str) -> Logo {
     for (ext, mime) in [("svg", "image/svg+xml"), ("png", "image/png")] {
         let url = format!("https://models.dev/logos/{id}.{ext}");
-        if let Ok(res) = client.get(url).send().await {
-            if res.status().is_success() {
-                if let Ok(bytes) = res.bytes().await {
-                    return Some((bytes.to_vec(), mime.to_owned()));
-                }
-            }
+        if let Ok(res) = client.get(url).send().await
+            && res.status().is_success()
+            && let Ok(bytes) = res.bytes().await
+        {
+            return Some((bytes.to_vec(), mime.to_owned()));
         }
     }
     None
@@ -146,12 +145,11 @@ fn enrich(p: &Value, catalog: &Value) -> Value {
         .and_then(Value::as_object);
     if let (Some(names), Some(models)) = (names, out["models"].as_array_mut()) {
         for m in models {
-            if let Some(id) = m["id"].as_str() {
-                if m["name"].as_str().is_none() {
-                    if let Some(name) = names.get(id).and_then(|e| e["name"].as_str()) {
-                        m["name"] = json!(name);
-                    }
-                }
+            if let Some(id) = m["id"].as_str()
+                && m["name"].as_str().is_none()
+                && let Some(name) = names.get(id).and_then(|e| e["name"].as_str())
+            {
+                m["name"] = json!(name);
             }
         }
     }

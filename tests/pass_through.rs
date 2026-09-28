@@ -138,15 +138,6 @@ async fn provider_scenario(
             )
         }
     };
-    let get_json = |url: String| {
-        let client = client.clone();
-        async move {
-            let body = client.get(url).send().await?.text().await?;
-            Ok::<_, reqwest::Error>(
-                serde_json::from_str::<serde_json::Value>(&body).expect("api answer is json"),
-            )
-        }
-    };
     let save_body = serde_json::json!({
         "id": "e2e", "new": true, "name": "E2E Vendor", "api": "openai",
         "chat": format!("http://{mock_addr}/v1"), "key": "sk-test-1234",
@@ -712,6 +703,7 @@ fn spawn_gateway(
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill();
+    let _ = child.wait();
     panic!("gateway never became ready at {gateway}");
 }
 
