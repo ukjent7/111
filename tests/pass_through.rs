@@ -1,0 +1,280 @@
+//! E2E: the real gateway binary against a mock upstream.
+//! Every check proves one facet of lossless pass-through; the run leaves a
+//! machine-readable report at the manifest root for CI to upload.
+
+use std::convert::Infallible;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::body::{to_bytes, Body, Bytes};
+use axum::extract::{Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::Response;
+use axum::Router;
+use futures::StreamExt;
+
+const SSE_EXPECTED: &[u8] = b"data: {\"chunk\":1}\n\ndata: {\"chunk\":2}\n\ndata: [DONE]\n\n";
+
+#[derive(Clone, Debug, Default)]
+struct Captured {
+    method: String,
+    path: String,
+    query: String,
+    body: Vec<u8>,
+    headers: HeaderMap,
+}
+
+type Shared = Arc<Mutex<Captured>>;
+
+#[derive(Debug)]
+struct Check {
+    name: &'static str,
+    ok: bool,
+    detail: String,
+}
+
+fn check(name: &'static str, result: Result<String, String>) -> Check {
+    let ok = result.is_ok();
+    Check { name, ok, detail: result.unwrap_or_else(|e| e) }
+}
+
+struct Gateway(Child);
+
+impl Drop for Gateway {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test]
+async fn gateway_passes_everything_through_losslessly() {
+    let run = tokio::time::timeout(Duration::from_secs(60), run_checks());
+    let checks = match run.await {
+        Ok(checks) => checks,
+        Err(_) => vec![check("the whole suite finishes in 60s", Err("timed out".into()))],
+    };
+    write_report(&checks);
+
+    let failed: Vec<&Check> = checks.iter().filter(|c| !c.ok).collect();
+    assert!(failed.is_empty(), "failed checks: {failed:#?}");
+}
+
+async fn run_checks() -> Vec<Check> {
+    let captured: Shared = Arc::default();
+    let mock_addr = spawn_mock(captured.clone()).await;
+    let gateway_addr = free_port();
+    let guard = spawn_gateway(gateway_addr, mock_addr);
+    let gateway = format!("http://{gateway_addr}");
+    let client = reqwest::Client::new();
+
+    let mut checks = Vec::new();
+    checks.extend(sse_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
+    checks.extend(binary_scenario(&client, &gateway).await);
+    checks.extend(status_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
+    drop(guard); // keep the child alive until every check ran
+    checks
+}
+
+/// An OpenAI-style POST whose answer is an SSE stream with a quiet gap in the
+/// middle: proves bytes arrive live (not buffered) and arrive complete.
+async fn sse_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str, captured: &Shared) -> Vec<Check> {
+    let body = r#"{"model":"m","messages":[{"role":"user","content":"你好 magpie 🎉"}]}"#;
+    let request = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer magpie")
+        .header("x-api-key", "magpie")
+        .header("anthropic-version", "2023-06-01")
+        .header("x-magpie-probe", "ping")
+        .header("connection", "x-magpie-hop")
+        .header("x-magpie-hop", "secret")
+        .body(body);
+
+    let t0 = Instant::now();
+    let res = request.send().await.expect("SSE request through the gateway");
+    let res_headers = res.headers().clone();
+    let mut stream = res.bytes_stream();
+    let first = stream.next().await.expect("at least one SSE chunk").expect("first SSE chunk");
+    let ttfb = t0.elapsed();
+    let mut received = first.to_vec();
+    while let Some(chunk) = stream.next().await {
+        received.extend(chunk.expect("SSE chunk"));
+    }
+    let total = t0.elapsed();
+
+    vec![
+        check("SSE body arrives byte for byte", (received == SSE_EXPECTED)
+            .then(|| format!("{} bytes", received.len()))
+            .ok_or_else(|| format!("expected {SSE_EXPECTED:?}, got {received:?}"))),
+        check("SSE streams live instead of buffering", (total >= Duration::from_millis(350) && ttfb < Duration::from_millis(250))
+            .then(|| format!("first byte after {ttfb:?}, done after {total:?}"))
+            .ok_or_else(|| format!("first byte after {ttfb:?}, done after {total:?} — the gap was swallowed"))),
+        check("response headers reach the client", {
+            let got = res_headers;
+            (got.get("x-request-id").and_then(|v| v.to_str().ok()) == Some("upstream-42")
+                && got.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").starts_with("text/event-stream"))
+            .then(|| "x-request-id and content-type survived".into())
+            .ok_or_else(|| format!("got {:#?}", got))
+        }),
+        {
+            let c = captured.lock().unwrap().clone();
+            check("the upstream saw the request intact", (c.method == "POST"
+                && c.path == "/v1/chat/completions"
+                && c.body == body.as_bytes()
+                && c.headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer magpie")
+                && c.headers.get("anthropic-version").and_then(|v| v.to_str().ok()) == Some("2023-06-01")
+                && c.headers.get("x-magpie-probe").and_then(|v| v.to_str().ok()) == Some("ping")
+                && !c.headers.contains_key("x-magpie-hop")
+                && c.headers.get(header::HOST).and_then(|v| v.to_str().ok()) == Some(mock_addr))
+            .then(|| format!("{} {} ({} bytes of body)", c.method, c.path, c.body.len()))
+            .ok_or_else(|| format!("captured {c:#?}")))
+        },
+    ]
+}
+
+/// One mebibyte of noise tagged with `content-encoding: gzip` the gateway must
+/// neither touch nor decode: round-trips byte for byte.
+async fn binary_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
+    let payload: Vec<u8> = (0..(1024 * 1024))
+        .map(|i| (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_shr(33) as u8)
+        .collect();
+    let res = client
+        .post(format!("{gateway}/echo"))
+        .header("content-encoding", "gzip")
+        .body(payload.clone())
+        .send()
+        .await
+        .expect("binary request through the gateway");
+    let content_encoding = res.headers().get("content-encoding").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let got = res.bytes().await.expect("binary response body");
+
+    vec![check("a 1 MiB encoded body round-trips untouched", (got == payload
+        && content_encoding.as_deref() == Some("gzip"))
+    .then(|| format!("{} bytes back", got.len()))
+    .ok_or_else(|| format!("{} bytes back, content-encoding {content_encoding:?}", got.len())))]
+}
+
+/// A 429 with a query string: status codes, response headers and the query all
+/// survive the hop.
+async fn status_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str, captured: &Shared) -> Vec<Check> {
+    let res = client
+        .get(format!("{gateway}/status?code=429"))
+        .send()
+        .await
+        .expect("status request through the gateway");
+    let status = res.status();
+    let retry_after = res.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let c = captured.lock().unwrap().clone();
+
+    vec![
+        check("status codes pass through", (status == StatusCode::TOO_MANY_REQUESTS)
+            .then(|| format!("got {status}"))
+            .ok_or_else(|| format!("got {status}"))),
+        check("response headers pass through", (retry_after.as_deref() == Some("7"))
+            .then(|| "retry-after survived".into())
+            .ok_or_else(|| format!("retry-after was {retry_after:?}"))),
+        check("the query string and method pass through", (c.method == "GET"
+            && c.query == "code=429"
+            && c.path == "/status"
+            && c.headers.get(header::HOST).and_then(|v| v.to_str().ok()) == Some(mock_addr))
+        .then(|| format!("{} {}?{}", c.method, c.path, c.query))
+        .ok_or_else(|| format!("captured {c:#?}"))),
+    ]
+}
+
+async fn spawn_mock(captured: Shared) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock upstream");
+    let addr = listener.local_addr().unwrap();
+    let app = Router::new().fallback(mock).with_state(captured);
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("mock upstream serves") });
+    addr
+}
+
+/// Records whatever the gateway sent, then answers from a handful of shapes.
+async fn mock(State(captured): State<Shared>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let bytes = to_bytes(body, usize::MAX).await.expect("mock reads request body");
+    *captured.lock().unwrap() = Captured {
+        method: parts.method.to_string(),
+        path: parts.uri.path().to_owned(),
+        query: parts.uri.query().unwrap_or_default().to_owned(),
+        body: bytes.to_vec(),
+        headers: parts.headers.clone(),
+    };
+
+    match parts.uri.path() {
+        "/v1/chat/completions" => Response::builder()
+            .header("content-type", "text/event-stream")
+            .header("x-request-id", "upstream-42")
+            .body(sse_body())
+            .unwrap(),
+        "/echo" => Response::builder()
+            .header("content-type", "application/octet-stream")
+            .header("content-encoding", "gzip")
+            .body(Body::from(bytes))
+            .unwrap(),
+        "/status" => Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("retry-after", "7")
+            .body(Body::from("slow down"))
+            .unwrap(),
+        _ => Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap(),
+    }
+}
+
+/// chunk 1, a 400 ms silence, chunk 2, done — timed so buffering shows.
+fn sse_body() -> Body {
+    Body::from_stream(futures::stream::unfold(0u8, |step| async move {
+        let (chunk, next, delay): (Bytes, u8, Duration) = match step {
+            0 => (Bytes::from_static(b"data: {\"chunk\":1}\n\n"), 1, Duration::from_millis(30)),
+            1 => (Bytes::from_static(b"data: {\"chunk\":2}\n\n"), 2, Duration::from_millis(400)),
+            2 => (Bytes::from_static(b"data: [DONE]\n\n"), 3, Duration::ZERO),
+            _ => return None,
+        };
+        tokio::time::sleep(delay).await;
+        Some((Ok::<_, Infallible>(chunk), next))
+    }))
+}
+
+fn spawn_gateway(gateway: SocketAddr, mock: SocketAddr) -> Gateway {
+    let child = Command::new(env!("CARGO_BIN_EXE_magpie-gateway"))
+        .arg("--listen")
+        .arg(gateway.to_string())
+        .arg("--upstream")
+        .arg(format!("http://{mock}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("gateway binary starts");
+    for _ in 0..150 {
+        if TcpStream::connect(gateway).is_ok() {
+            return Gateway(child);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    panic!("gateway never became ready at {gateway}");
+}
+
+fn free_port() -> SocketAddr {
+    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+}
+
+fn write_report(checks: &[Check]) {
+    let passed = checks.iter().filter(|c| c.ok).count();
+    let report = serde_json::json!({
+        "suite": "magpie-gateway pass-through E2E",
+        "checks": checks
+            .iter()
+            .map(|c| serde_json::json!({"name": c.name, "ok": c.ok, "detail": c.detail}))
+            .collect::<Vec<_>>(),
+        "passed": passed,
+        "failed": checks.len() - passed,
+        "all_passed": passed == checks.len(),
+    });
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("e2e-report.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+}
