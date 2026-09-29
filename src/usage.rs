@@ -356,7 +356,7 @@ fn harvest(v: &Value, out: &mut Vec<Tokens>) {
 
 /// the usage a whole answer reports: read as one JSON document (a plain
 /// answer) and line by line (an SSE stream), then merged
-pub fn extract(bytes: &[u8]) -> Tokens {
+fn extract(bytes: &[u8]) -> Tokens {
     let mut maps: Vec<Tokens> = Vec::new();
     if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
         harvest(&v, &mut maps);
