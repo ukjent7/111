@@ -255,7 +255,7 @@ fn enrich(p: &Provider, catalog: &Value) -> Value {
             }
         }
     }
-    if out["models"].as_array().map_or(true, |m| m.is_empty()) {
+    if out["models"].as_array().is_none_or(|m| m.is_empty()) {
         let cat_key = if !p.catalog.is_empty() {
             &p.catalog
         } else {
