@@ -249,9 +249,10 @@ pub async fn favicon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Re
     } else {
         format!("https://{url}")
     };
-    let Some((scheme, host)) = reqwest::Url::parse(&full).ok().and_then(|u| {
-        Some((u.scheme().to_owned(), u.host_str()?.to_owned()))
-    }) else {
+    let Some((scheme, host)) = reqwest::Url::parse(&full)
+        .ok()
+        .and_then(|u| Some((u.scheme().to_owned(), u.host_str()?.to_owned())))
+    else {
         return err(StatusCode::BAD_REQUEST, "that is not a URL");
     };
     // Google's favicon service has almost every site; the site's own
