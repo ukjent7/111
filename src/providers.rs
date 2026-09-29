@@ -192,13 +192,25 @@ async fn fetch_and_persist_logo(client: &reqwest::Client, logos_dir: &Path, id: 
 pub fn payload(app: &App, cfg: &ConfigState) -> Value {
     let catalog = app.catalog.lock().unwrap();
     let providers: Vec<Value> = cfg.providers.iter().map(|p| enrich(p, &catalog)).collect();
-    let models: usize = providers
+    let models: usize = cfg
+        .providers
         .iter()
-        .filter_map(|p| p.get("models").and_then(Value::as_array))
-        .map(|arr| {
-            arr.iter()
-                .filter(|m| m.get("on").and_then(Value::as_bool).unwrap_or(true))
-                .count()
+        .map(|p| {
+            if p.models.is_empty() {
+                let cat_key = if !p.catalog.is_empty() {
+                    &p.catalog
+                } else {
+                    &p.id
+                };
+                catalog
+                    .get(cat_key.as_str())
+                    .and_then(|c| c.get("models"))
+                    .and_then(Value::as_object)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            } else {
+                p.models.iter().filter(|m| m.on).count()
+            }
         })
         .sum();
     let calls: Vec<Value> = app
@@ -582,6 +594,7 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     // presets, balance URLs, fallbacks, contexts — anything else the UI
     // carries lands in `extra`
     rec.extra.extend(req.rest);
+    let had_models = req.models.as_ref().is_some_and(|m| !m.is_empty());
     if let Some(on) = req.models {
         rec.models = merge_models(&rec.models, &on);
     }
@@ -610,11 +623,13 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     if let Some(res) = persisted(&app, &cfg) {
         return res;
     }
-    let id_for_fetch = req.id.clone();
-    let app_for_fetch = app.clone();
-    tokio::spawn(async move {
-        let _ = fetch_models_for_provider(&app_for_fetch, &id_for_fetch).await;
-    });
+    if !had_models {
+        let id_for_fetch = req.id.clone();
+        let app_for_fetch = app.clone();
+        tokio::spawn(async move {
+            let _ = fetch_models_for_provider(&app_for_fetch, &id_for_fetch).await;
+        });
+    }
     Json(payload(&app, &cfg)).into_response()
 }
 

@@ -1256,7 +1256,7 @@ function gatewayModels() {
   // the routing groups first, as the agents' pickers list them
   const out = (providers?.gateway?.groups || []).map((g) => ({ id: g.id, name: g.name, icons: g.icons, group: true,
     provider: { name: [t("routing group"), g.providers.join(", ")].filter(Boolean).join(" · ") } }));
-  for (const p of (providers?.providers || [])) for (const m of (p.models || [])) if (m.on !== false) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p });
+  for (const p of (providers?.providers || [])) for (const m of (p.models || [])) if (m.on) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p });
   return out;
 }
 
