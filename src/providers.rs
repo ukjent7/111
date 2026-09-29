@@ -66,6 +66,7 @@ pub async fn fetch_catalog(client: &reqwest::Client) -> anyhow::Result<Value> {
 /// 2. Embedded assets in binary (`UI` static dir) with vendor aliases.
 /// 3. Persistent disk cache in `app.logos_dir`.
 /// 4. Remote fetch from models.dev with a short timeout, saved to disk on success.
+///
 /// All successful responses include aggressive Cache-Control headers for the webview.
 pub async fn icon(
     State(app): State<Arc<App>>,
