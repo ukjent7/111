@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
@@ -41,8 +41,6 @@ pub struct Gateway {
 pub struct ConfigState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub upstream: String,
     #[serde(default)]
     pub providers: Vec<providers::Provider>,
     #[serde(default)]
@@ -109,52 +107,20 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let (mut listen, mut upstream, mut window, mut config_flag) = (None, None, true, None);
-    let mut args = std::env::args().skip(1);
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "--listen" => {
-                listen = Some(
-                    args.next()
-                        .with_context(|| format!("flag {flag} needs a value"))?,
-                )
-            }
-            "--upstream" => {
-                upstream = Some(
-                    args.next()
-                        .with_context(|| format!("flag {flag} needs a value"))?,
-                )
-            }
-            "--config" => {
-                config_flag = Some(
-                    args.next()
-                        .with_context(|| format!("flag {flag} needs a value"))?,
-                )
-            }
-            "--no-window" => window = false,
-            other => bail!(
-                "unknown argument {other:?}; usage: magpie-gateway [--listen <addr>] [--upstream <url>] [--config <path>] [--no-window]"
-            ),
-        }
-    }
-
-    // the app opens its window no matter what; a provider given on the command
-    // line is remembered, so the next launch can be a plain double-click
-    let config_path = config_path(config_flag.as_deref())?;
+    // the config file, the address and the window are env-tunable for the
+    // test suite; a plain double-click needs none of them
+    let config_path = match std::env::var("MAGPIE_CONFIG") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => config_path()?,
+    };
     let mut cfg = load_config(&config_path);
-    if let Some(given) = &upstream {
-        cfg.upstream = given.clone();
-        persist(&config_path, &cfg)?;
-        tracing::info!("provider saved to {}", config_path.display());
-    }
-    let listen: SocketAddr = listen
+    let window = std::env::var("MAGPIE_NO_WINDOW").is_err();
+    let listen: SocketAddr = std::env::var("MAGPIE_LISTEN")
+        .ok()
         .or(cfg.listen.take())
         .unwrap_or_else(|| "127.0.0.1:8787".into())
         .parse()
-        .context("invalid --listen address")?;
-    if !cfg.upstream.is_empty() {
-        reqwest::Url::parse(&cfg.upstream).context("invalid --upstream URL")?;
-    }
+        .context("invalid MAGPIE_LISTEN address")?;
 
     let client = build_client(
         cfg.settings
@@ -162,10 +128,10 @@ fn main() -> Result<()> {
             .and_then(Value::as_str)
             .unwrap_or(""),
     );
-    let role = if cfg.upstream.is_empty() {
+    let role = if cfg.providers.is_empty() {
         ", no provider configured yet".to_owned()
     } else {
-        format!(", raw upstream {}", cfg.upstream)
+        format!(", {} provider(s)", cfg.providers.len())
     };
     let catalog_path = config_path.with_file_name("catalog.json");
     let logos_dir = config_path
@@ -384,12 +350,11 @@ fn host_name(host: &str) -> String {
 
 /// Whatever arrives goes out unchanged: same method, path, query, headers and
 /// body bytes (streamed both ways, so SSE and big payloads never buffer) —
-/// to the provider the UI configured, or to the raw upstream from the
-/// command line. Only the key is swapped in.
+/// to the provider the UI configured. Only the key is swapped in.
 async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     let started = Instant::now();
     let (mut parts, body) = req.into_parts();
-    let mut path = parts
+    let path = parts
         .uri
         .path_and_query()
         .map(|pq| pq.as_str().to_owned())
@@ -412,34 +377,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
 
     let cfg = app.config.lock().await;
 
-    // 1. Check if URL path starts with a provider prefix: /<provider>/...
-    let mut path_provider_hint: Option<String> = None;
-    let (path_only, query_part) = match path.split_once('?') {
-        Some((p, q)) => (p, Some(q)),
-        None => (path.as_str(), None),
-    };
-    let trimmed_path = path_only.trim_start_matches('/');
-    if let Some((first_seg, rest)) = trimmed_path.split_once('/') {
-        if let Some(p) = cfg.providers.iter().find(|p| {
-            p.id.eq_ignore_ascii_case(first_seg) || p.name.eq_ignore_ascii_case(first_seg)
-        }) {
-            path_provider_hint = Some(p.id.clone());
-            path = match query_part {
-                Some(q) => format!("/{rest}?{q}"),
-                None => format!("/{rest}"),
-            };
-        }
-    } else if let Some(p) = cfg.providers.iter().find(|p| {
-        p.id.eq_ignore_ascii_case(trimmed_path) || p.name.eq_ignore_ascii_case(trimmed_path)
-    }) {
-        path_provider_hint = Some(p.id.clone());
-        path = match query_part {
-            Some(q) => format!("/?{q}"),
-            None => "/".to_string(),
-        };
-    }
-
-    // 2. Check if JSON body specifies a provider prefix in "model": "<provider>/<model>" or "<provider>:<model>"
+    // Check if JSON body specifies a provider prefix in "model": "<provider>/<model>" or "<provider>:<model>"
     let mut model_name: Option<String> = None;
     let mut model_provider_hint: Option<String> = None;
     let mut forwarded_body = body_bytes;
@@ -466,55 +404,25 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
         }
     }
 
-    let provider_hint = model_provider_hint
-        .as_deref()
-        .or(path_provider_hint.as_deref());
+    let provider_hint = model_provider_hint.as_deref();
 
-    enum Dest {
-        Provider(providers::Target),
-        Legacy(String),
-    }
-    let dest = if cfg.providers.is_empty() {
-        (!cfg.upstream.is_empty()).then(|| Dest::Legacy(cfg.upstream.clone()))
-    } else {
-        providers::route_for(&cfg, provider_hint, &path).map(Dest::Provider)
-    };
+    let dest = providers::route_for(&cfg, provider_hint, &path);
     drop(cfg);
 
     let to = match dest {
         None => {
-            let msg = "magpie: no provider configured yet — add one in the Providers tab, or pass --upstream <url> once";
+            let msg = "magpie: no provider configured yet — add one in the Providers tab";
             return (StatusCode::BAD_GATEWAY, msg.to_owned()).into_response();
         }
-        Some(Dest::Legacy(base)) => format!("{}{}", base.trim_end_matches('/'), path),
-        Some(Dest::Provider(mut t)) => {
+        Some(mut t) => {
+            // the client's key never rides along, whatever header it used
             parts.headers.remove(header::AUTHORIZATION);
             parts.headers.remove("x-api-key");
             parts.headers.remove("x-goog-api-key");
-            if !t.key.is_empty() {
-                // Google takes the key bare, in its own header; the others
-                // spell it as a bearer token
-                let (name, value) = match t.auth {
-                    providers::Auth::Anthropic => ("x-api-key", t.key.clone()),
-                    providers::Auth::Google => ("x-goog-api-key", t.key.clone()),
-                    providers::Auth::Bearer => ("authorization", format!("Bearer {}", t.key)),
-                };
-                if let Ok(value) = HeaderValue::from_str(&value) {
-                    parts.headers.insert(HeaderName::from_static(name), value);
-                }
-            }
-            if t.auth == providers::Auth::Google {
-                // Google accepts the key in the query string too: the
-                // client's own `key` must not survive beside magpie's
-                if let Ok(mut u) = reqwest::Url::parse(&t.url) {
-                    let kept: Vec<(String, String)> = u
-                        .query_pairs()
-                        .filter(|(k, _)| k != "key")
-                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                        .collect();
-                    u.query_pairs_mut().clear().extend_pairs(kept);
-                    t.url = u.to_string();
-                }
+            if !t.key.is_empty()
+                && let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", t.key))
+            {
+                parts.headers.insert(header::AUTHORIZATION, value);
             }
             for (name, value) in &t.headers {
                 if let (Ok(name), Ok(value)) = (
@@ -738,12 +646,9 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
-/// Where the provider and port settings live; `--config` moves the file
+/// Where the provider and port settings live; MAGPIE_CONFIG moves the file
 /// (the E2E suite keeps its own in a temp dir).
-fn config_path(flag: Option<&str>) -> Result<PathBuf> {
-    if let Some(path) = flag {
-        return Ok(path.into());
-    }
+fn config_path() -> Result<PathBuf> {
     let base = match std::env::consts::OS {
         "windows" => std::env::var_os("APPDATA")
             .map(PathBuf::from)

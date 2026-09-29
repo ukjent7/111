@@ -356,7 +356,7 @@ pub fn payload(app: &App, cfg: &ConfigState) -> Value {
 /// catalog when it knows the model.
 fn enrich(p: &Provider, catalog: &Value) -> Value {
     let mut out = serde_json::to_value(p).unwrap_or_default();
-    let host = host_of(p.base_url());
+    let host = host_of(&p.chat);
     let local = matches!(
         host.as_str(),
         "127.0.0.1" | "localhost" | "[::1]" | "0.0.0.0"
@@ -475,7 +475,7 @@ fn presets(catalog: &Value) -> Value {
 fn fallback_url(id: &str) -> Option<&'static str> {
     Some(match id {
         "openai" => "https://api.openai.com/v1",
-        "anthropic" => "https://api.anthropic.com",
+        "anthropic" => "https://api.anthropic.com/v1",
         "google" => "https://generativelanguage.googleapis.com/v1beta/openai",
         "groq" => "https://api.groq.com/openai/v1",
         "mistral" => "https://api.mistral.ai/v1",
@@ -532,15 +532,7 @@ pub struct Provider {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub key: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub api: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub chat: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub responses: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub anthropic: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub gemini: String,
     /// when the vendor's own model list was last fetched, for the editor's
     /// "vendor list" hint; the models.dev list stands in until then
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -602,67 +594,9 @@ where
         .collect()
 }
 
-/// The protocol a request or a provider speaks.
-#[derive(Clone, Copy, PartialEq)]
-enum Api {
-    Chat,
-    Responses,
-    Anthropic,
-    Gemini,
-}
-
-impl Provider {
-    fn url(&self, api: Api) -> &str {
-        match api {
-            Api::Chat => &self.chat,
-            Api::Responses => &self.responses,
-            Api::Anthropic => &self.anthropic,
-            Api::Gemini => &self.gemini,
-        }
-    }
-
-    /// The URL an API is actually reachable on.
-    fn url_set(&self, api: Api) -> Option<&str> {
-        Some(self.url(api)).filter(|s| !s.is_empty())
-    }
-
-    /// The URL the Gemini wire protocol is asked at: the provider's own, or
-    /// Google's, derived from its OpenAI-compatible spelling (…/v1beta/openai
-    /// drops the /openai).
-    fn gemini_url(&self) -> Option<&str> {
-        if !self.gemini.is_empty() {
-            return Some(&self.gemini);
-        }
-        self.chat
-            .contains("generativelanguage.googleapis.com")
-            .then(|| self.chat.strip_suffix("/openai").unwrap_or(&self.chat))
-    }
-
-    /// The first URL the provider declares, in chat → responses → anthropic
-    /// → gemini order; the host shown in the list row is picked from it.
-    pub fn base_url(&self) -> &str {
-        [Api::Chat, Api::Responses, Api::Anthropic, Api::Gemini]
-            .into_iter()
-            .find_map(|api| self.url_set(api))
-            .unwrap_or("")
-    }
-}
-
-fn api_proto(p: &Provider) -> Api {
-    match p.api.as_str() {
-        "responses" => Api::Responses,
-        "anthropic" => Api::Anthropic,
-        "gemini" | "google" => Api::Gemini,
-        _ if !p.anthropic.is_empty() && p.chat.is_empty() => Api::Anthropic,
-        _ if !p.gemini.is_empty() && p.chat.is_empty() && p.responses.is_empty() => Api::Gemini,
-        _ => Api::Chat,
-    }
-}
-
-/// Everything after a `/v1` of its own: OpenAI's two dialects put the version
-/// in both the client's path and the base URL, so it is counted once — and
-/// the slash of the prefix stays, so the rest still starts with one. A path
-/// that merely starts with those letters (`/v1beta`) never comes here.
+/// Everything after a `/v1` of its own: the version sits in both the
+/// client's path and the base URL, so it is counted once — and the slash of
+/// the prefix stays, so the rest still starts with one.
 fn after_v1(path: &str) -> &str {
     path.strip_prefix("/v1").unwrap_or(path)
 }
@@ -694,15 +628,7 @@ struct SaveRequest {
     #[serde(default)]
     key: Option<String>,
     #[serde(default)]
-    api: Option<String>,
-    #[serde(default)]
     chat: Option<String>,
-    #[serde(default)]
-    responses: Option<String>,
-    #[serde(default)]
-    anthropic: Option<String>,
-    #[serde(default)]
-    gemini: Option<String>,
     #[serde(default)]
     catalog: Option<String>,
     #[serde(default)]
@@ -742,20 +668,8 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     if let Some(v) = req.key {
         rec.key = v;
     }
-    if let Some(v) = req.api {
-        rec.api = v;
-    }
     if let Some(v) = req.chat {
         rec.chat = v;
-    }
-    if let Some(v) = req.responses {
-        rec.responses = v;
-    }
-    if let Some(v) = req.anthropic {
-        rec.anthropic = v;
-    }
-    if let Some(v) = req.gemini {
-        rec.gemini = v;
     }
     if let Some(v) = req.catalog {
         rec.catalog = v;
@@ -778,6 +692,10 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     // presets, balance URLs, fallbacks, contexts — anything else the UI
     // carries lands in `extra`
     rec.extra.extend(req.rest);
+    // per-protocol URLs of older builds are not read any more
+    for k in ["api", "responses", "anthropic", "gemini"] {
+        rec.extra.shift_remove(k);
+    }
     // a preset's URLs come from the catalog, not the form: a preset asks
     // only for a key
     let preset_id = rec
@@ -786,11 +704,7 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    if !preset_id.is_empty()
-        && rec.chat.is_empty()
-        && rec.responses.is_empty()
-        && rec.anthropic.is_empty()
-    {
+    if !preset_id.is_empty() && rec.chat.is_empty() {
         let url = {
             let cat = app.catalog.lock().unwrap();
             cat.get(&preset_id)
@@ -800,11 +714,7 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
                 .or_else(|| fallback_url(&preset_id).map(str::to_owned))
         };
         if let Some(u) = url.as_deref().map(|u| u.trim_end_matches('/')) {
-            if u.contains("api.anthropic.com") {
-                rec.anthropic = u.to_owned();
-            } else {
-                rec.chat = u.to_owned();
-            }
+            rec.chat = u.to_owned();
         }
     }
     let had_models = req.models.as_ref().is_some_and(|m| !m.is_empty());
@@ -871,34 +781,25 @@ pub async fn reveal_key(State(app): State<Arc<App>>, Json(body): Json<Value>) ->
 }
 
 pub async fn fetch_models_for_provider(app: &Arc<App>, id: &str) -> anyhow::Result<usize> {
-    let (base, key, anthropic) = {
+    let (base, key) = {
         let cfg = app.config.lock().await;
         let p = cfg
             .providers
             .iter()
             .find(|p| p.id == id)
             .context("no such provider")?;
-        let base = [p.models_url.as_str(), p.chat.as_str(), p.responses.as_str()]
+        let base = [p.models_url.as_str(), p.chat.as_str()]
             .into_iter()
             .find(|s| !s.is_empty())
             .map(|s| format!("{}/models", s.trim_end_matches('/')))
-            .or_else(|| {
-                (!p.anthropic.is_empty())
-                    .then(|| format!("{}/v1/models", p.anthropic.trim_end_matches('/')))
-            })
             .unwrap_or_default();
-        (base, p.key.clone(), !p.anthropic.is_empty())
+        (base, p.key.clone())
     };
     if base.is_empty() {
         anyhow::bail!("this provider has no URL to list models from");
     }
     let mut req = app.client().get(&base).timeout(Duration::from_secs(5));
-    if anthropic {
-        if !key.is_empty() {
-            req = req.header("x-api-key", &key);
-        }
-        req = req.header("anthropic-version", "2023-06-01");
-    } else if !key.is_empty() {
+    if !key.is_empty() {
         req = req.header(header::AUTHORIZATION, format!("Bearer {key}"));
     }
     let res = req.send().await?;
@@ -1056,83 +957,38 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
                 .collect()
         })
         .unwrap_or_default();
-    let results: Vec<Value> = if per_model.is_empty() {
-        let fallback = p
+    let models: Vec<String> = if per_model.is_empty() {
+        vec![p
             .models
             .iter()
             .find(|m| m.on)
             .map(|m| m.id.clone())
-            .unwrap_or_else(|| "test".to_owned());
-        let mut out = Vec::new();
-        for (name, api) in [
-            ("chat", Api::Chat),
-            ("responses", Api::Responses),
-            ("anthropic", Api::Anthropic),
-        ] {
-            match p.url_set(api) {
-                None => out
-                    .push(json!({ "protocol": name, "ok": false, "error": "no URL for this API" })),
-                Some(base) => {
-                    let mut r = tiny_request(&app.client(), api, base, &p.key, &fallback).await;
-                    r["protocol"] = json!(name);
-                    out.push(r);
-                }
-            }
-        }
-        out
+            .unwrap_or_else(|| "test".to_owned())]
     } else {
-        let proto = api_proto(&p);
-        let Some(base) = p.url_set(proto) else {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "this provider has no URL for its own API",
-            );
-        };
-        let mut out = Vec::new();
-        for model in &per_model {
-            out.push(tiny_request(&app.client(), proto, base, &p.key, model).await);
-        }
-        out
+        per_model
     };
+    if p.chat.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "this provider has no URL");
+    }
+    let mut results = Vec::new();
+    for model in &models {
+        results.push(tiny_request(&app.client(), &p.chat, &p.key, model).await);
+    }
     (StatusCode::OK, Json(json!({ "results": results }))).into_response()
 }
 
-async fn tiny_request(
-    client: &reqwest::Client,
-    proto: Api,
-    base: &str,
-    key: &str,
-    model: &str,
-) -> Value {
+async fn tiny_request(client: &reqwest::Client, base: &str, key: &str, model: &str) -> Value {
     let t0 = Instant::now();
-    let url = match proto {
-        Api::Anthropic => format!("{}/v1/messages", base.trim_end_matches('/')),
-        Api::Chat => format!("{}/chat/completions", base.trim_end_matches('/')),
-        Api::Responses => format!("{}/responses", base.trim_end_matches('/')),
-        Api::Gemini => format!(
-            "{}/models/{model}:generateContent",
-            base.trim_end_matches('/')
-        ),
-    };
-    let body = match proto {
-        Api::Anthropic | Api::Chat => {
-            json!({ "model": model, "max_tokens": 1, "messages": [{ "role": "user", "content": "hi" }] }).to_string()
-        }
-        Api::Responses => json!({ "model": model, "input": "hi", "max_output_tokens": 1 }).to_string(),
-        Api::Gemini => json!({ "contents": [{ "parts": [{ "text": "hi" }] }] }).to_string(),
-    };
+    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+    let body =
+        json!({ "model": model, "max_tokens": 1, "messages": [{ "role": "user", "content": "hi" }] })
+            .to_string();
     let mut req = client
         .post(&url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body);
     if !key.is_empty() {
-        req = match proto {
-            Api::Anthropic => req
-                .header("x-api-key", key)
-                .header("anthropic-version", "2023-06-01"),
-            Api::Gemini => req.header("x-goog-api-key", key),
-            _ => req.header(header::AUTHORIZATION, format!("Bearer {key}")),
-        };
+        req = req.header(header::AUTHORIZATION, format!("Bearer {key}"));
     }
     match req.send().await {
         Ok(res) => {
@@ -1171,89 +1027,37 @@ fn merge_models(existing: &[Model], on: &[String]) -> Vec<Model> {
 
 // ---------- where a pass-through request goes ----------
 
-/// How the vendor is told who is asking: a bearer key, Anthropic's header,
-/// or Google's.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Auth {
-    Bearer,
-    Anthropic,
-    Google,
-}
-
 pub struct Target {
     pub url: String,
     pub key: String,
     pub headers: Map<String, Value>,
-    pub auth: Auth,
 }
 
-/// The request path decides the protocol. If a `provider_hint` is provided,
-/// the matching provider (by id or name, case-insensitive) is preferred.
-/// Otherwise, the first provider that serves the protocol wins.
+/// The hinted provider (by id or name, case-insensitive) takes the request,
+/// else the first one with a chat URL. The path rides as-is, minus a single
+/// leading `/v1` (the version sits in the base URL too).
 pub fn route_for(
     cfg: &ConfigState,
     provider_hint: Option<&str>,
     path_and_query: &str,
 ) -> Option<Target> {
-    let (path, query) = match path_and_query.split_once('?') {
-        Some((p, q)) => (p, Some(q)),
-        None => (path_and_query, None),
-    };
-    let gemini_path = path.contains(":generateContent")
-        || path.contains(":streamGenerateContent")
-        || path.contains(":countTokens")
-        || path.starts_with("/v1beta/");
-    let (api, sub) = if path.starts_with("/v1/messages") || path.starts_with("/v1/complete") {
-        (Api::Anthropic, path.to_owned())
-    } else if gemini_path {
-        (
-            Api::Gemini,
-            path.strip_prefix("/v1beta").unwrap_or(path).to_owned(),
-        )
-    } else if path.contains("/responses") {
-        (Api::Responses, after_v1(path).to_owned())
-    } else {
-        (Api::Chat, after_v1(path).to_owned())
-    };
-    let sub = if sub.is_empty() { "/".to_owned() } else { sub };
-
-    let to_target = |p: &Provider, allow_fallback: bool| -> Option<Target> {
-        let base = match api {
-            // Gemini only goes to a provider that speaks it natively: some
-            // other protocol's URL would answer garbage, not an error
-            Api::Gemini => p.gemini_url()?,
-            _ if allow_fallback => p.url_set(api).unwrap_or_else(|| p.base_url()),
-            _ => p.url(api),
-        }
-        .trim_end_matches('/');
+    let to_target = |p: &Provider| -> Option<Target> {
+        let base = p.chat.trim_end_matches('/');
         if base.is_empty() {
             return None;
         }
-        let mut url = format!("{base}{sub}");
-        if let Some(q) = query {
-            url.push('?');
-            url.push_str(q);
-        }
         Some(Target {
-            url,
+            url: format!("{base}{}", after_v1(path_and_query)),
             key: p.key.clone(),
             headers: p.headers.clone(),
-            auth: match api {
-                Api::Anthropic => Auth::Anthropic,
-                Api::Gemini => Auth::Google,
-                _ => Auth::Bearer,
-            },
         })
     };
-
-    if let Some(target) = provider_hint.and_then(|hint| {
-        cfg.providers
-            .iter()
-            .find(|p| p.id.eq_ignore_ascii_case(hint) || p.name.eq_ignore_ascii_case(hint))
-            .and_then(|p| to_target(p, true))
-    }) {
-        return Some(target);
-    }
-
-    cfg.providers.iter().find_map(|p| to_target(p, false))
+    provider_hint
+        .and_then(|hint| {
+            cfg.providers
+                .iter()
+                .find(|p| p.id.eq_ignore_ascii_case(hint) || p.name.eq_ignore_ascii_case(hint))
+        })
+        .or_else(|| cfg.providers.first())
+        .and_then(to_target)
 }

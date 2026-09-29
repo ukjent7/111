@@ -1540,7 +1540,7 @@ function renderAdd() {
   const drawTiles = () => {
     tiles.replaceChildren();
     const f = presetQuery.trim().toLowerCase();
-    const hit = (pr) => !f || pr.name.toLowerCase().includes(f) || pr.id.includes(f) || hostOf(pr.chat || pr.responses || pr.anthropic).includes(f) || (pr.note || "").toLowerCase().includes(f);
+    const hit = (pr) => !f || pr.name.toLowerCase().includes(f) || pr.id.includes(f) || hostOf(pr.chat).includes(f) || (pr.note || "").toLowerCase().includes(f);
     let any = false;
     // the user's own comes first: a custom provider needs no vendor to exist
     any = true;
@@ -1625,7 +1625,7 @@ function tile(pr) {
   const tt = el("span", "tt");
   const n = el("span", "n", pr.name);
   if (pr.sponsored) n.append(el("span", "badge", t("sponsored")));
-  tt.append(n, el("span", "s", pr.note || hostOf(pr.chat || pr.responses || pr.anthropic)));
+  tt.append(n, el("span", "s", pr.note || hostOf(pr.chat)));
   b.append(tt);
   if (pr.added) {
     const ck = el("span", "check");
@@ -1825,7 +1825,7 @@ function iconPicker(ed) {
     const site = el("button", "text", t("From the website"));
     site.title = t("Look for the icon of the site the base URL is on");
     site.onclick = async () => {
-      const base = draft[apiField[draft.api]] || draft.chat || draft.responses || draft.anthropic || "";
+      const base = draft.chat || "";
       site.disabled = true;
       site.textContent = t("Looking…");
       try {
@@ -1940,8 +1940,6 @@ function slide(box, key) {
   if (control) thumbs.set(control, { ...to, from, at: performance.now() });
 }
 
-const PROTOS = [["chat", "OpenAI", "Chat Completions — most agents"], ["responses", "Responses", "OpenAI Responses — what Codex speaks"], ["anthropic", "Anthropic", "Anthropic Messages — what Claude Code speaks"], ["decide", "Jev", "Jev's decision API (TypeSafe's, or a gateway's) — what a routing group asks as a turn begins"]];
-
 // renderEditor: an existing provider (p), a new preset (presetID), or custom.
 function renderEditor(p, presetID) {
   const pr = presetID ? providers.presets.find((x) => x.id === presetID) : p?.preset ? providers.presets.find((x) => x.id === p.preset) : null;
@@ -1950,10 +1948,10 @@ function renderEditor(p, presetID) {
   // more provider of it, under a name and id of its own
   const another = isNew && !!pr?.added;
   draft = draft || (p
-    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.chat ? "openai" : p.anthropic ? "anthropic" : p.responses ? "responses" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "", fallback: [...(p.fallback || [])], unlisted: !!p.unlisted, balanceURL: p.balanceURL || "", balancePath: p.balancePath || "", modelsURL: p.modelsURL || "", contexts: contextsText(p.contexts) }
+    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, catalog: p.catalog, key: "", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "", fallback: [...(p.fallback || [])], unlisted: !!p.unlisted, balanceURL: p.balanceURL || "", balancePath: p.balancePath || "", modelsURL: p.modelsURL || "", contexts: contextsText(p.contexts) }
     : pr
       ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [], headers: [] }
-      : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [], headers: [], icon: "" });
+      : { id: "", name: "", preset: "", chat: "", catalog: "", key: "", chosen: [], extra: [], headers: [], icon: "" });
   const ed = el("div", "editor" + (isNew ? " new" : ""));
   ed.onclick = (e) => e.stopPropagation();
 
@@ -2022,39 +2020,9 @@ function renderEditor(p, presetID) {
     ed.append(...field(t("Name"), name));
     if (p) idField();
 
-    // the base URL is the one the chosen protocol is asked at; a vendor
-    // that serves only the Responses API is added (and tested) with that
-    // alone, since /chat/completions would only fail (#73)
-    const seg = el("div", "segs");
-    for (const [v, l, hint] of [["openai", "OpenAI compatible", "…/v1 — chat completions, and responses when the vendor has it"], ["responses", "OpenAI Responses", "…/v1 — for a vendor that serves only the Responses API, not chat completions"], ["anthropic", "Anthropic compatible", "the root URL, what ANTHROPIC_BASE_URL would take"]]) {
-      const b = el("button", "opt" + (draft.api === v ? " on" : ""), t(l));
-      b.title = t(hint);
-      b.onclick = () => {
-        if (draft.api === v) return;
-        // each protocol keeps its own URL (#105). One typed here and not
-        // saved moves to a protocol without one, spelled as that protocol
-        // wants it: the kind was picked after the URL (#73). A saved URL
-        // stays where it is, and one not given yet stays empty.
-        const from = apiField[draft.api], to = apiField[v];
-        if (!draft[to] && draft[from] && draft[from] !== (p?.[from] || "")) {
-          draft[to] = respellURL(draft[from], v);
-          draft[from] = p?.[from] || "";
-        }
-        draft.api = v;
-        url.value = draft[to] || "";
-        for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b);
-        slide(seg, "api");
-        url.placeholder = v === "anthropic" ? "https://…" : "https://…/v1";
-        fillEndpoints();
-      };
-      seg.append(b);
-    }
-    queueMicrotask(() => slide(seg, "api"));
-    url = input(draft[apiField[draft.api]], draft.api === "anthropic" ? "https://…" : "https://…/v1", "url");
-    url.oninput = () => { draft[apiField[draft.api]] = url.value; };
-    const urlWrap = el("div", "stack");
-    urlWrap.append(seg, url);
-    ed.append(...field("Base URL", urlWrap));
+    url = input(draft.chat, "https://…/v1", "url");
+    url.oninput = () => { draft.chat = url.value; };
+    ed.append(...field("Base URL", url));
   }
 
   if (p?.account) {
@@ -2070,7 +2038,7 @@ function renderEditor(p, presetID) {
     }
     ed.append(...field(t("Models"), renderModels(p), ""));
     ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
-    if (p.chat || p.responses || p.anthropic) ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
+    if (p.chat) ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
     const bar = el("div", "bar");
     // removing only hides it from magpie; the agent stays signed in
     const del = el("button", "text danger", t("Remove"));
@@ -2159,7 +2127,7 @@ function renderEditor(p, presetID) {
     for (const r of pr.regions) {
       const b = el("button", "opt" + (r.id === cur.id ? " on" : ""), t(r.name));
       b.onclick = () => {
-        draft.chat = r.chat || ""; draft.responses = r.responses || ""; draft.anthropic = r.anthropic || "";
+        draft.chat = r.chat || "";
         for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b);
         slide(seg, "regions");
         refreshEndpoints();
@@ -2182,7 +2150,7 @@ function renderEditor(p, presetID) {
     const ebox = el("div");
     refreshEndpoints = () => {
       const base = p || pr || {};
-      const src = { chat: draft.chat || base.chat || "", responses: draft.responses || base.responses || "", anthropic: draft.anthropic || base.anthropic || "", decide: base.decide || "" };
+      const src = { chat: draft.chat || base.chat || "" };
       ebox.replaceChildren(renderEndpoints(p, src));
     };
     refreshEndpoints();
@@ -2193,23 +2161,6 @@ function renderEditor(p, presetID) {
     const more = el("details", "more");
     more.append(el("summary", "", t("More endpoints")));
     const inner = el("div", "inner");
-    // the other protocols' URLs, drawn again when the base URL's changes
-    const eps = el("div");
-    eps.style.display = "contents";
-    fillEndpoints = () => {
-      eps.replaceChildren();
-      const add = (label, key, ph, hint) => {
-        if (apiField[draft.api] === key) return;
-        const i = input(draft[key], ph, "url");
-        i.oninput = () => { draft[key] = i.value; };
-        eps.append(...field(t(label), i, t(hint)));
-      };
-      add("OpenAI URL", "chat", "https://…/v1", "if the vendor also serves chat completions");
-      add("Anthropic URL", "anthropic", "https://…", "if the vendor also serves Anthropic messages");
-      add("Responses URL", "responses", "https://…/v1", "if the vendor serves the OpenAI Responses API (Codex uses it natively)");
-    };
-    fillEndpoints();
-    inner.append(eps);
     const mu = input(draft.modelsURL, "https://…/v1/models", "url");
     mu.oninput = () => { draft.modelsURL = mu.value; };
     inner.append(...field(t("Models URL"), mu, t("Where the vendor lists its models, when that isn't under the base URL; asked with the key")));
@@ -2245,7 +2196,7 @@ function renderEditor(p, presetID) {
   const saveBtn = el("button", "text primary", t(isNew ? "Add" : "Save"));
   const save = () => {
     // new: an Add never replaces a provider that has the id already
-    const body = { id: p ? slug(draft.id) || p.id : draft.id, from: p?.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? chosenIds() : draft.extra, headers: headersOf(draft.headers), new: isNew };
+    const body = { id: p ? slug(draft.id) || p.id : draft.id, from: p?.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, catalog: draft.catalog, models: p ? chosenIds() : draft.extra, headers: headersOf(draft.headers), new: isNew };
     if (custom) { body.icon = draft.icon || "generic"; body.balanceURL = (draft.balanceURL || "").trim(); body.balancePath = (draft.balancePath || "").trim(); body.modelsURL = (draft.modelsURL || "").trim(); }
     if (p) { body.fallback = draft.fallback; body.unlisted = draft.unlisted; }
     const cx = parseContexts(draft.contexts || "");
@@ -2341,35 +2292,34 @@ function parseContexts(text) {
 // The endpoints a provider serves, with a Test that reports against each one.
 function renderEndpoints(p, src) {
   const eps = el("div", "eps");
-  const slots = {};
-  const urls = src || {};
-  for (const [proto] of PROTOS) {
-    if (!urls[proto]) continue;
+  const url = (src || {}).chat || "";
+  if (url) {
     const e = el("div", "ep");
-    e.append(el("code", "", urls[proto]), slots[proto] = el("span", "res"));
+    const slot = el("span", "res");
+    e.append(el("code", "", url), slot);
     eps.append(e);
-  }
-  if (p) {
-    const test = el("button", "text action", t("Test"));
-    test.title = t("Send a tiny request through each endpoint");
-    test.onclick = async () => {
-      test.classList.add("busy");
-      for (const s of Object.values(slots)) { s.className = "res wait"; s.textContent = "…"; }
-      try {
-        const r = await api("provider/test", { id: p.id });
-        for (const x of r.results) {
-          const s = slots[x.protocol];
-          if (!s) continue;
-          s.className = "res " + (x.ok ? "ok" : "bad");
-          s.replaceChildren();
-          s.append(svg(x.ok ? CHECK : "M4.5 4.5l7 7M11.5 4.5l-7 7", 10, 2));
-          s.append(el("span", "", x.ok ? `${x.ms} ms` : x.status ? `${x.status} · ${x.error}` : x.error));
-          s.title = x.ok ? t("model {model}", { model: x.model }) : x.error;
-        }
-      } catch (e) { for (const s of Object.values(slots)) { s.className = "res"; s.textContent = ""; } status(e.message, "err"); }
-      test.classList.remove("busy");
-    };
-    eps.append(test);
+    if (p) {
+      const test = el("button", "text action", t("Test"));
+      test.title = t("Send a tiny request through each endpoint");
+      test.onclick = async () => {
+        test.classList.add("busy");
+        slot.className = "res wait";
+        slot.textContent = "…";
+        try {
+          const r = await api("provider/test", { id: p.id });
+          const x = r.results[0];
+          if (x) {
+            slot.className = "res " + (x.ok ? "ok" : "bad");
+            slot.replaceChildren();
+            slot.append(svg(x.ok ? CHECK : "M4.5 4.5l7 7M11.5 4.5l-7 7", 10, 2));
+            slot.append(el("span", "", x.ok ? `${x.ms} ms` : x.status ? `${x.status} · ${x.error}` : x.error));
+            slot.title = x.ok ? t("model {model}", { model: x.model }) : x.error;
+          }
+        } catch (e) { slot.className = "res"; slot.textContent = ""; status(e.message, "err"); }
+        test.classList.remove("busy");
+      };
+      eps.append(test);
+    }
   }
   return eps;
 }
@@ -3180,17 +3130,7 @@ async function keyFingerprint(key) {
   } catch { return ""; }
 }
 
-// apiField is the draft's URL a custom provider's base URL fills, by the
 // protocol chosen for it.
-const apiField = { openai: "chat", responses: "responses", anthropic: "anthropic" };
-
-// respellURL turns a base URL into the one protocol api is asked at: the
-// root for Anthropic, which adds /v1 itself, …/v1 for OpenAI's two.
-function respellURL(u, api) {
-  u = u.trim().replace(/\/+$/, "");
-  if (api === "anthropic") return u.replace(/\/v1$/, "");
-  return /\/v\d+[a-z]*$/.test(u) || !/^https?:\/\/[^/]+$/.test(u) ? u : u + "/v1";
-}
 
 async function providerAction(action, body, okMsg, base = "provider/") {
   try {
@@ -3312,12 +3252,6 @@ function fmtN(n) {
   if (n >= 1e5) return Math.round(n / 1e3) + "K";
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
   return String(n);
-}
-function fmtCost(t) {
-  if (!t.cost && t.unpriced) return "";
-  const c = t.cost;
-  const s = c >= 100 ? c.toFixed(0) : c >= 1 ? c.toFixed(2) : c.toFixed(3);
-  return "$" + s + (t.unpriced ? "+" : "");
 }
 const tokensOf = (t) => t.input + t.output;
 
@@ -3792,7 +3726,7 @@ function renderUsage() {
     out.style.height = (100 * p.output / peak).toFixed(1) + "%";
     b.append(out, inp);
     const when = u.bucket === "hour" ? `${p.label}:00` : u.bucket === "week" ? t("week of {label}", { label: p.label }) : p.label;
-    b.title = p.calls ? t(p.calls === 1 ? "{when} · {tokens} tokens · {n} call" : "{when} · {tokens} tokens · {n} calls", { when, tokens: fmtN(tokensOf(p)), n: p.calls }) + (fmtCost(p) ? " · ≈" + fmtCost(p) : "") : t("{when} · nothing", { when });
+    b.title = p.calls ? t(p.calls === 1 ? "{when} · {tokens} tokens · {n} call" : "{when} · {tokens} tokens · {n} calls", { when, tokens: fmtN(tokensOf(p)), n: p.calls }) : t("{when} · nothing", { when });
     bars.append(b);
     const last = i === n - 1 && (n - 1) % every >= every / 2;
     labels.append(el("span", "", i % every === 0 || last ? p.label : ""));
@@ -3823,7 +3757,6 @@ function renderUsage() {
       const num = el("div", "num");
       num.append(el("b", "", fmtN(tokensOf(g))), el("small", "", t("{a} in · {b} out", { a: fmtN(g.input), b: fmtN(g.output) }) + (g.cache_read ? " · " + t("{n} cached", { n: fmtN(g.cache_read) }) : "")));
       r.append(num);
-      r.append(el("div", "cost", fmtCost(g) ? "≈" + fmtCost(g) : ""));
       box.append(r);
     }
   };

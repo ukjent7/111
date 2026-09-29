@@ -99,9 +99,8 @@ async fn run_checks() -> Vec<Check> {
     checks.extend(usage_scenario(&client, &mock).await);
     checks.extend(host_scenario(gateway_addr));
     checks.extend(provider_scenario(&client, &gateway, &mock, &captured).await);
-    checks.extend(config_scenario(&config, &mock));
+    checks.extend(config_scenario(&config));
     checks.extend(no_provider_scenario(&client).await);
-    checks.extend(gemini_scenario(&client, &gateway, &mock, &captured).await);
     checks.extend(editor_scenario(&client, &gateway, &mock).await);
     checks.extend(icons_scenario(&client, &gateway, &mock).await);
     checks.extend(wiring_scenario(&client, &gateway).await);
@@ -136,15 +135,13 @@ fn host_scenario(gateway_addr: SocketAddr) -> Vec<Check> {
     )]
 }
 
-/// A provider given on the command line lands in the config file, so the next
-/// launch can be a plain double-click — and the file holds keys, so on Unix
-/// it is owner-only.
-fn config_scenario(config: &Path, mock_addr: &str) -> Vec<Check> {
-    let saved = std::fs::read(config)
+/// The config file the gateway writes: valid JSON — and it holds keys, so on
+/// Unix it is owner-only.
+fn config_scenario(config: &Path) -> Vec<Check> {
+    let parsed = std::fs::read(config)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|v| v["upstream"].as_str().map(str::to_owned));
-    let expected = format!("http://{mock_addr}");
+        .is_some();
     #[cfg(unix)]
     let owner_only = {
         use std::os::unix::fs::PermissionsExt;
@@ -155,20 +152,17 @@ fn config_scenario(config: &Path, mock_addr: &str) -> Vec<Check> {
     #[cfg(not(unix))]
     let owner_only = true;
     vec![check(
-        "the provider setting is remembered for the next launch",
-        (saved.as_deref() == Some(expected.as_str()) && owner_only)
-            .then(|| format!("config.json now names {saved:?}, owner-only: {owner_only}"))
-            .ok_or_else(|| {
-                format!(
-                    "config.json has {saved:?}, expected {expected:?}, owner-only: {owner_only}"
-                )
-            }),
+        "the config file on disk is valid JSON and owner-only on Unix",
+        (parsed && owner_only)
+            .then(|| format!("config.json parses, owner-only: {owner_only}"))
+            .ok_or_else(|| format!("config.json parses: {parsed}, owner-only: {owner_only}")),
     )]
 }
 
 /// A provider added through the UI's editor: listed back with its models,
-/// then actually used as the pass-through target — path mapped, key swapped
-/// in, extra headers attached — and gone again after Remove.
+/// then actually used as the pass-through target — the model prefix picks it,
+/// the key is swapped in, extra headers attached — and gone again after
+/// Remove.
 async fn provider_scenario(
     client: &reqwest::Client,
     gateway: &str,
@@ -197,7 +191,7 @@ async fn provider_scenario(
         }
     };
     let save_body = serde_json::json!({
-        "id": "e2e", "new": true, "name": "E2E Vendor", "api": "openai",
+        "id": "e2e", "new": true, "name": "E2E Vendor",
         "chat": format!("http://{mock_addr}/v1"), "key": "sk-test-1234",
         "models": ["alpha", "beta"], "headers": { "x-extra": "1" },
     });
@@ -222,7 +216,7 @@ async fn provider_scenario(
 
     // Register a second provider e2e-b that also provides the same model "alpha"
     let save_b_body = serde_json::json!({
-        "id": "e2e-b", "new": true, "name": "E2E Vendor B", "api": "openai",
+        "id": "e2e-b", "new": true, "name": "E2E Vendor B",
         "chat": format!("http://{mock_addr}/b/v1"), "key": "sk-test-b",
         "models": ["alpha"], "headers": { "x-provider": "b" },
     });
@@ -251,17 +245,6 @@ async fn provider_scenario(
         .await
         .unwrap();
     let c_colon = captured.lock().unwrap().clone();
-
-    // 3. Explicit path prefix: "/e2e-b/v1/chat/completions"
-    let path_body = r#"{"model":"alpha","messages":[{"role":"user","content":"hi"}]}"#;
-    client
-        .post(format!("{gateway}/e2e-b/v1/chat/completions"))
-        .header("content-type", "application/json")
-        .body(path_body)
-        .send()
-        .await
-        .unwrap();
-    let c_path = captured.lock().unwrap().clone();
 
     // Clean up e2e-b
     let _ = post(
@@ -354,12 +337,18 @@ async fn provider_scenario(
             .ok_or_else(|| format!("openai failed: status={}", embedded_res.status())),
     );
 
+    let by_id = |v: &serde_json::Value, id: &str| {
+        v["providers"]
+            .as_array()
+            .and_then(|p| p.iter().find(|x| x["id"] == serde_json::json!(id)))
+            .cloned()
+            .unwrap_or_default()
+    };
     vec![
         check(
             "a provider added in the UI is listed back",
-            (saved["providers"][0]["id"] == serde_json::json!("e2e")
-                && saved["providers"][0]["models"].as_array().map(|m| m.len()) == Some(2)
-                && saved["providers"][0]["key"]["set"] == serde_json::json!(true)
+            (by_id(&saved, "e2e")["models"].as_array().map(|m| m.len()) == Some(2)
+                && by_id(&saved, "e2e")["key"]["set"] == serde_json::json!(true)
                 && saved["gateway"]["models"] == serde_json::json!(2)
                 && listed["presets"].is_array())
             .then(|| {
@@ -397,10 +386,9 @@ async fn provider_scenario(
             "a provider removed in the UI is gone",
             (deleted["providers"]
                 .as_array()
-                .map(|p| p.is_empty())
-                .unwrap_or(false)
+                .is_some_and(|p| p.iter().all(|x| x["id"] != serde_json::json!("e2e")))
                 && deleted["gateway"]["models"] == serde_json::json!(0))
-            .then(|| "no providers left, no models served".into())
+            .then(|| "no e2e provider left, no models served".into())
             .ok_or_else(|| format!("deleted: {deleted}")),
         ),
         check(
@@ -430,20 +418,6 @@ async fn provider_scenario(
                     .unwrap_or(false))
             .then(|| "e2e-b:alpha forwarded as alpha to e2e-b".into())
             .ok_or_else(|| format!("c_colon: {c_colon:#?}")),
-        ),
-        check(
-            "explicit path prefix routes to provider",
-            (c_path.path == "/b/v1/chat/completions"
-                && c_path
-                    .headers
-                    .get("x-provider")
-                    .and_then(|v| v.to_str().ok())
-                    == Some("b")
-                && serde_json::from_slice::<serde_json::Value>(&c_path.body)
-                    .map(|v| v["model"] == "alpha")
-                    .unwrap_or(false))
-            .then(|| "/e2e-b/v1/chat/completions routed to e2e-b".into())
-            .ok_or_else(|| format!("c_path: {c_path:#?}")),
         ),
         logo,
         embedded_logo,
@@ -767,7 +741,7 @@ async fn status_scenario(
             "the query string and method pass through",
             (c.method == "GET"
                 && c.query == "code=429"
-                && c.path == "/status"
+                && c.path == "/v1/status"
                 && c.headers.get(header::HOST).and_then(|v| v.to_str().ok()) == Some(mock_addr))
             .then(|| format!("{} {}?{}", c.method, c.path, c.query))
             .ok_or_else(|| format!("captured {c:#?}")),
@@ -915,100 +889,6 @@ fn asset_bytes() -> Vec<u8> {
         .clone()
 }
 
-/// Gemini on the wire: the path decides the protocol, the key swaps into
-/// Google's header (or its query parameter), and the version prefix of the
-/// base URL and the path are counted once.
-async fn gemini_scenario(
-    client: &reqwest::Client,
-    gateway: &str,
-    mock_addr: &str,
-    captured: &Shared,
-) -> Vec<Check> {
-    let save = serde_json::json!({
-        "id": "gm", "new": true, "name": "Gemini Vendor",
-        "chat": format!("http://{mock_addr}/openai/v1"), "gemini": format!("http://{mock_addr}/v1beta"),
-        "key": "gm-key", "models": ["gemini-x"],
-    });
-    let saved = get_json_raw(
-        client
-            .post(format!("{gateway}/api/provider/save"))
-            .header("content-type", "application/json")
-            .body(save.to_string())
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-
-    let body = r#"{"contents":[{"parts":[{"text":"hi"}]}]}"#;
-    client
-        .post(format!("{gateway}/v1beta/models/gemini-x:generateContent"))
-        .header("x-goog-api-key", "magpie")
-        .header("authorization", "Bearer magpie")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    let by_header = captured.lock().unwrap().clone();
-
-    client
-        .post(format!(
-            "{gateway}/v1beta/models/gemini-x:generateContent?key=magpie"
-        ))
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    let by_query = captured.lock().unwrap().clone();
-
-    let _ = client
-        .post(format!("{gateway}/api/provider/delete"))
-        .header("content-type", "application/json")
-        .body(serde_json::json!({"id": "gm"}).to_string())
-        .send()
-        .await
-        .unwrap();
-
-    vec![
-        check(
-            "a gemini provider is saved with its own endpoint",
-            (saved["providers"].as_array().map(|p| p.len()) == Some(1))
-                .then(|| "saved".into())
-                .ok_or_else(|| format!("saved: {saved}")),
-        ),
-        check(
-            "the gemini protocol routes to the provider's gemini URL with its key",
-            (by_header.method == "POST"
-                && by_header.path == "/v1beta/models/gemini-x:generateContent"
-                && by_header
-                    .headers
-                    .get("x-goog-api-key")
-                    .and_then(|v| v.to_str().ok())
-                    == Some("gm-key")
-                && !by_header.headers.contains_key("authorization"))
-            .then(|| {
-                format!(
-                    "{} {} with x-goog-api-key",
-                    by_header.method, by_header.path
-                )
-            })
-            .ok_or_else(|| format!("captured {by_header:#?}")),
-        ),
-        check(
-            "the key in the query string is the client's, and it does not survive",
-            (by_query.path == "/v1beta/models/gemini-x:generateContent"
-                && by_query.query.is_empty()
-                && by_query
-                    .headers
-                    .get("x-goog-api-key")
-                    .and_then(|v| v.to_str().ok())
-                    == Some("gm-key"))
-            .then(|| "query key stripped, header key swapped in".into())
-            .ok_or_else(|| format!("captured {by_query:#?}")),
-        ),
-    ]
-}
-
 /// The editor's quiet endpoints: a model's display name and reasoning levels
 /// are saved apart from Save, and a fetched vendor list can be dropped again.
 async fn editor_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str) -> Vec<Check> {
@@ -1087,7 +967,7 @@ async fn editor_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &st
     let model = |v: &serde_json::Value| {
         v["providers"]
             .as_array()
-            .and_then(|p| p.first())
+            .and_then(|p| p.iter().find(|x| x["id"] == serde_json::json!("ed")))
             .and_then(|p| p["models"].as_array())
             .and_then(|m| m.first())
             .cloned()
@@ -1098,7 +978,7 @@ async fn editor_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &st
         model(&efforted),
         listed["providers"]
             .as_array()
-            .and_then(|p| p.first())
+            .and_then(|p| p.iter().find(|x| x["id"] == serde_json::json!("ed")))
             .cloned()
             .unwrap_or_default(),
     );
@@ -1373,13 +1253,6 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
                 r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":500,"output_tokens":50,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}"#,
             ))
             .unwrap(),
-        // a Gemini-style answer: usageMetadata counts, cached included in the prompt
-        p if p.contains(":generateContent") => Response::builder()
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"candidates":[],"usageMetadata":{"promptTokenCount":400,"candidatesTokenCount":40,"thoughtsTokenCount":10,"cachedContentTokenCount":100}}"#,
-            ))
-            .unwrap(),
         "/favicon.ico" => Response::builder()
             .header("content-type", "image/png")
             .body(Body::from(PNG_BYTES.to_vec()))
@@ -1400,12 +1273,12 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
             .header("content-type", "application/octet-stream")
             .body(Body::from(asset_bytes()))
             .unwrap(),
-        "/echo" => Response::builder()
+        p if p.ends_with("/echo") => Response::builder()
             .header("content-type", "application/octet-stream")
             .header("content-encoding", "gzip")
             .body(Body::from(bytes))
             .unwrap(),
-        "/status" => Response::builder()
+        p if p.ends_with("/status") => Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
             .header("retry-after", "7")
             .body(Body::from("slow down"))
@@ -1457,13 +1330,21 @@ fn spawn_gateway(
     with_provider: bool,
     envs: &[(&str, &str)],
 ) -> Gateway {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_magpie-gateway"));
-    cmd.arg("--listen").arg(gateway.to_string());
-    cmd.arg("--config").arg(config);
-    cmd.arg("--no-window");
     if with_provider {
-        cmd.arg("--upstream").arg(format!("http://{mock}"));
+        // the provider a pass-through scenario needs, as the config itself
+        // would hold it: one OpenAI-style vendor pointing at the mock
+        let cfg = serde_json::json!({
+            "providers": [{
+                "id": "mock", "name": "Mock",
+                "chat": format!("http://{mock}/v1"), "key": "magpie",
+            }]
+        });
+        std::fs::write(config, cfg.to_string()).unwrap();
     }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_magpie-gateway"));
+    cmd.env("MAGPIE_LISTEN", gateway.to_string());
+    cmd.env("MAGPIE_CONFIG", config);
+    cmd.env("MAGPIE_NO_WINDOW", "1");
     for (k, v) in envs {
         cmd.env(k, v);
     }
