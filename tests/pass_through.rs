@@ -223,7 +223,7 @@ async fn provider_scenario(
     )
     .await;
 
-    // vendor logos come from models.dev, served through /api/icons/<id>
+    // vendor logos come from models.dev or embedded assets, served through /api/icons/<id>
     let presets = listed["presets"].as_array().cloned().unwrap_or_default();
     let logo = if presets.is_empty() {
         check(
@@ -245,13 +245,46 @@ async fn provider_scenario(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_owned();
+        let cc = res
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
         check(
-            "preset tiles carry models.dev logos",
-            (icon.starts_with("file:") && status.is_success() && mime.starts_with("image/"))
-                .then(|| format!("{id}: {status} {mime}"))
-                .ok_or_else(|| format!("{id}: icon {icon:?}, {status} {mime}")),
+            "preset tiles carry models.dev logos with cache headers",
+            (icon.starts_with("file:")
+                && status.is_success()
+                && mime.starts_with("image/")
+                && cc.contains("max-age="))
+                .then(|| format!("{id}: {status} {mime} cc={cc}"))
+                .ok_or_else(|| format!("{id}: icon {icon:?}, {status} {mime}, cc {cc:?}")),
         )
     };
+
+    let embedded_res = client
+        .get(format!("{gateway}/api/icons/openai"))
+        .send()
+        .await
+        .unwrap();
+    let embedded_ok = embedded_res.status().is_success()
+        && embedded_res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            == Some("image/svg+xml")
+        && embedded_res
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .map(|cc| cc.contains("max-age="))
+            .unwrap_or(false);
+    let embedded_logo = check(
+        "embedded vendor logos resolve immediately from binary with cache headers",
+        embedded_ok
+            .then(|| "openai: 200 image/svg+xml cached".to_string())
+            .ok_or_else(|| format!("openai failed: status={}", embedded_res.status())),
+    );
 
     vec![
         check(
@@ -303,6 +336,7 @@ async fn provider_scenario(
             .ok_or_else(|| format!("deleted: {deleted}")),
         ),
         logo,
+        embedded_logo,
     ]
 }
 

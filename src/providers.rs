@@ -3,8 +3,9 @@
 //! a passing-through request goes, per protocol, among the configured
 //! providers.
 
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
@@ -60,38 +61,127 @@ pub async fn fetch_catalog(client: &reqwest::Client) -> anyhow::Result<Value> {
     Ok(serde_json::from_str(&text)?)
 }
 
-/// A vendor's models.dev logo, fetched on first use and cached (a miss is
-/// cached too, so a vendor without a logo costs one request per run).
+/// A vendor's logo, resolved via a multi-tier cache:
+/// 1. In-memory `app.logos` cache.
+/// 2. Embedded assets in binary (`UI` static dir) with vendor aliases.
+/// 3. Persistent disk cache in `app.logos_dir`.
+/// 4. Remote fetch from models.dev with a short timeout, saved to disk on success.
+/// All successful responses include aggressive Cache-Control headers for the webview.
 pub async fn icon(
     State(app): State<Arc<App>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    let hit = {
-        let cache = app.logos.lock().unwrap();
-        cache.get(&id).cloned()
-    };
-    let logo = match hit {
-        Some(cached) => cached,
-        None => {
-            let fetched = fetch_logo(&app.client, &id).await;
-            app.logos.lock().unwrap().insert(id, fetched.clone());
-            fetched
-        }
-    };
+    if let Some(hit) = app.logos.lock().unwrap().get(&id).cloned() {
+        return respond_logo(hit);
+    }
+
+    if let Some((bytes, mime)) = find_embedded_logo(&id) {
+        app.logos
+            .lock()
+            .unwrap()
+            .insert(id, Some((bytes.clone(), mime.clone())));
+        return respond_logo(Some((bytes, mime)));
+    }
+
+    if let Some((bytes, mime)) = find_disk_logo(&app.logos_dir, &id) {
+        app.logos
+            .lock()
+            .unwrap()
+            .insert(id, Some((bytes.clone(), mime.clone())));
+        return respond_logo(Some((bytes, mime)));
+    }
+
+    let fetched = fetch_and_persist_logo(&app.client, &app.logos_dir, &id).await;
+    app.logos.lock().unwrap().insert(id, fetched.clone());
+    respond_logo(fetched)
+}
+
+fn respond_logo(logo: Logo) -> Response {
     match logo {
-        Some((bytes, mime)) => ([(header::CONTENT_TYPE, mime)], bytes).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+        Some((bytes, mime)) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=2592000, immutable".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (
+            [(header::CACHE_CONTROL, "public, max-age=300".to_string())],
+            StatusCode::NOT_FOUND,
+        )
+            .into_response(),
     }
 }
 
-async fn fetch_logo(client: &reqwest::Client, id: &str) -> Logo {
+fn find_embedded_logo(id: &str) -> Option<(Vec<u8>, String)> {
+    let mut names = vec![
+        format!("icons/{id}-color.svg"),
+        format!("icons/{id}.svg"),
+        format!("icons/{id}.png"),
+    ];
+    match id {
+        "google" => {
+            names.push("icons/gemini-color.svg".into());
+            names.push("icons/googlecloud-color.svg".into());
+        }
+        "gemini" => names.push("icons/gemini-color.svg".into()),
+        "claude" => {
+            names.push("icons/claude-color.svg".into());
+            names.push("icons/anthropic.svg".into());
+        }
+        "siliconflow" => names.push("icons/siliconcloud-color.svg".into()),
+        "zhipuai" | "glm" => names.push("icons/zhipu-color.svg".into()),
+        "github" | "copilot" => names.push("icons/githubcopilot.svg".into()),
+        "togetherai" => names.push("icons/together-color.svg".into()),
+        "mistralai" => names.push("icons/mistral-color.svg".into()),
+        "kimi" => names.push("icons/kimi.svg".into()),
+        "dashscope" | "tongyi" => names.push("icons/qwen-color.svg".into()),
+        "tencent" | "hunyuan" => names.push("icons/tencentcloud-color.svg".into()),
+        "fireworksai" => names.push("icons/fireworks-color.svg".into()),
+        _ => {}
+    }
+    for name in names {
+        if let Some(file) = crate::UI.get_file(&name) {
+            let mime = if name.ends_with(".png") {
+                "image/png"
+            } else {
+                "image/svg+xml"
+            };
+            return Some((file.contents().to_vec(), mime.to_owned()));
+        }
+    }
+    None
+}
+
+fn find_disk_logo(logos_dir: &Path, id: &str) -> Option<(Vec<u8>, String)> {
+    let svg_path = logos_dir.join(format!("{id}.svg"));
+    if let Ok(bytes) = std::fs::read(&svg_path) {
+        return Some((bytes, "image/svg+xml".to_owned()));
+    }
+    let png_path = logos_dir.join(format!("{id}.png"));
+    if let Ok(bytes) = std::fs::read(&png_path) {
+        return Some((bytes, "image/png".to_owned()));
+    }
+    None
+}
+
+async fn fetch_and_persist_logo(client: &reqwest::Client, logos_dir: &Path, id: &str) -> Logo {
     for (ext, mime) in [("svg", "image/svg+xml"), ("png", "image/png")] {
         let url = format!("https://models.dev/logos/{id}.{ext}");
-        if let Ok(res) = client.get(url).send().await
+        let req = client.get(&url).timeout(Duration::from_secs(4));
+        if let Ok(res) = req.send().await
             && res.status().is_success()
             && let Ok(bytes) = res.bytes().await
         {
-            return Some((bytes.to_vec(), mime.to_owned()));
+            let data = bytes.to_vec();
+            let _ = std::fs::create_dir_all(logos_dir);
+            let disk_file = logos_dir.join(format!("{id}.{ext}"));
+            let _ = std::fs::write(disk_file, &data);
+            return Some((data, mime.to_owned()));
         }
     }
     None

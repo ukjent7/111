@@ -117,9 +117,45 @@ code { font: 11.5px var(--code); }
 .ic img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .ic .mask { width: 100%; height: 100%; background: currentColor; -webkit-mask: var(--i) center / contain no-repeat; mask: var(--i) center / contain no-repeat; }
 .ic.generic { color: var(--muted); }
+
+/* Vendor & image logo badge for high contrast in dark and light themes */
+.ic.has-img, .ic:has(img) {
+  background: #ffffff;
+  border-radius: 5px;
+  padding: 2px;
+  box-sizing: border-box;
+  box-shadow: 0 0 0 1px var(--line), 0 1px 2px rgba(0, 0, 0, .05);
+}
+:root:not([data-theme="light"]) .ic.has-img,
+:root:not([data-theme="light"]) .ic:has(img),
+:root[data-theme="dark"] .ic.has-img,
+:root[data-theme="dark"] .ic:has(img) {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .4), 0 0 0 .5px rgba(255, 255, 255, .12);
+}
+.row .ic.has-img, .row .ic:has(img),
+.tile .ic.has-img, .tile .ic:has(img),
+.editor .ehead .ic.has-img, .editor .ehead .ic:has(img),
+.editor .icon-pick .icon-now .ic.has-img, .editor .icon-pick .icon-now .ic:has(img) {
+  border-radius: 6px;
+  padding: 2.5px;
+}
+
 /* a routing group's providers, overlapping discs with the first on top */
 .ic-stack { display: inline-flex; flex: none; align-items: center; }
-.ic-stack .disc { position: relative; width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--card); box-shadow: 0 0 0 1px var(--line); }
+.ic-stack .disc { position: relative; width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: #ffffff; box-shadow: 0 0 0 1px var(--line); }
+:root:not([data-theme="light"]) .ic-stack .disc,
+:root[data-theme="dark"] .ic-stack .disc {
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .15), 0 1px 3px rgba(0, 0, 0, .3);
+}
+.ic-stack .disc > .ic.has-img,
+.ic-stack .disc > .ic:has(img) {
+  background: transparent;
+  box-shadow: none;
+  border-radius: 50%;
+  padding: 1px;
+}
 .ic-stack .disc + .disc { margin-left: -4px; }
 .ic-stack .disc:nth-child(1) { z-index: 3; }
 .ic-stack .disc:nth-child(2) { z-index: 2; }

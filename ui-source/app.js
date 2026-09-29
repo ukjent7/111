@@ -106,6 +106,7 @@ function icon(name) {
   }
   if (name?.startsWith("file:")) {
     // a picture the user gave their own provider
+    e.classList.add("has-img");
     const img = el("img");
     img.src = "/api/icons/" + encodeURIComponent(name.slice(5));
     img.alt = "";
@@ -116,6 +117,7 @@ function icon(name) {
   }
   if (name) {
     if (name.endsWith("-color") || name === "crush" || name === "zcode" || name === "alma" || name === "hanako" || name === "cindy" || name === "typesafe") {
+      e.classList.add("has-img");
       const img = el("img");
       img.src = `icons/${name}.${name === "crush" || name === "zcode" || name === "alma" || name === "hanako" || name === "cindy" || name === "typesafe" ? "png" : "svg"}`;
       img.alt = "";

@@ -24,7 +24,7 @@ use tracing_subscriber::EnvFilter;
 mod providers;
 
 // the prepared UI, embedded so the binary alone is the whole desktop app
-static UI: Dir<'_> = include_dir!("ui-source");
+pub static UI: Dir<'_> = include_dir!("ui-source");
 
 pub struct Gateway {
     pub url: String,
@@ -55,6 +55,8 @@ pub struct App {
     pub catalog: Mutex<Value>,
     /// the catalog's disk cache, next to the config
     pub catalog_path: PathBuf,
+    /// directory where vendor logos are cached on disk
+    pub logos_dir: PathBuf,
     /// vendor logos from models.dev, by id; a miss is remembered too
     pub logos: Mutex<HashMap<String, Logo>>,
     pub gateway: Gateway,
@@ -124,12 +126,20 @@ fn main() -> Result<()> {
         format!(", raw upstream {}", cfg.upstream)
     };
     let catalog_path = config_path.with_file_name("catalog.json");
+    let logos_dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("logos");
+    if let Err(e) = std::fs::create_dir_all(&logos_dir) {
+        tracing::warn!("failed to create logos dir: {e}");
+    }
     let app = Arc::new(App {
         client,
         config: tokio::sync::Mutex::new(cfg),
         config_path,
         catalog: Mutex::new(load_catalog(&catalog_path)),
         catalog_path,
+        logos_dir,
         logos: Mutex::new(HashMap::new()),
         gateway: Gateway {
             url: format!("http://{listen}"),
