@@ -368,27 +368,24 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     let mut model_provider_hint: Option<String> = None;
     let mut forwarded_body = body_bytes;
 
-    if !forwarded_body.is_empty() {
-        if let Ok(mut json_val) = serde_json::from_slice::<Value>(&forwarded_body) {
-            if let Some(obj) = json_val.as_object_mut() {
-                if let Some(model_val) = obj.get("model").and_then(Value::as_str) {
-                    model_name = Some(model_val.to_owned());
-                    for sep in ['/', ':'] {
-                        if let Some((prefix, clean_model)) = model_val.split_once(sep) {
-                            if let Some(p) = cfg.providers.iter().find(|p| {
-                                p.id.eq_ignore_ascii_case(prefix)
-                                    || p.name.eq_ignore_ascii_case(prefix)
-                            }) {
-                                model_provider_hint = Some(p.id.clone());
-                                obj.insert("model".to_owned(), json!(clean_model));
-                                if let Ok(new_bytes) = serde_json::to_vec(&json_val) {
-                                    forwarded_body = Bytes::from(new_bytes);
-                                }
-                                break;
-                            }
-                        }
-                    }
+    if !forwarded_body.is_empty()
+        && let Ok(mut json_val) = serde_json::from_slice::<Value>(&forwarded_body)
+        && let Some(obj) = json_val.as_object_mut()
+        && let Some(model_val) = obj.get("model").and_then(Value::as_str)
+    {
+        model_name = Some(model_val.to_owned());
+        for sep in ['/', ':'] {
+            if let Some((prefix, clean_model)) = model_val.split_once(sep)
+                && let Some(p) = cfg.providers.iter().find(|p| {
+                    p.id.eq_ignore_ascii_case(prefix) || p.name.eq_ignore_ascii_case(prefix)
+                })
+            {
+                model_provider_hint = Some(p.id.clone());
+                obj.insert("model".to_owned(), json!(clean_model));
+                if let Ok(new_bytes) = serde_json::to_vec(&json_val) {
+                    forwarded_body = Bytes::from(new_bytes);
                 }
+                break;
             }
         }
     }
@@ -404,7 +401,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     let dest = if cfg.providers.is_empty() {
         (!cfg.upstream.is_empty()).then(|| Dest::Legacy(cfg.upstream.clone()))
     } else {
-        providers::route_for_with_provider(&cfg, provider_hint, &path).map(Dest::Provider)
+        providers::route_for(&cfg, provider_hint, &path).map(Dest::Provider)
     };
     drop(cfg);
 

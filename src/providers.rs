@@ -820,7 +820,7 @@ pub struct Target {
 /// The request path decides the protocol. If a `provider_hint` is provided,
 /// the matching provider (by id or name, case-insensitive) is preferred.
 /// Otherwise, the first provider that serves the protocol wins.
-pub fn route_for_with_provider(
+pub fn route_for(
     cfg: &ConfigState,
     provider_hint: Option<&str>,
     path_and_query: &str,
@@ -867,21 +867,14 @@ pub fn route_for_with_provider(
         })
     };
 
-    if let Some(hint) = provider_hint {
-        if let Some(p) = cfg
-            .providers
+    if let Some(target) = provider_hint.and_then(|hint| {
+        cfg.providers
             .iter()
             .find(|p| p.id.eq_ignore_ascii_case(hint) || p.name.eq_ignore_ascii_case(hint))
-        {
-            if let Some(target) = to_target(p, true) {
-                return Some(target);
-            }
-        }
+            .and_then(|p| to_target(p, true))
+    }) {
+        return Some(target);
     }
 
     cfg.providers.iter().find_map(|p| to_target(p, false))
-}
-
-pub fn route_for(cfg: &ConfigState, path_and_query: &str) -> Option<Target> {
-    route_for_with_provider(cfg, None, path_and_query)
 }
