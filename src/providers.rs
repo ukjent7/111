@@ -257,7 +257,7 @@ pub async fn favicon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Re
     ];
     let client = app.client();
     for url in urls {
-        let Ok(res) = client.get(&url).timeout(Duration::from_secs(5)).send().await
+        if let Ok(res) = client.get(&url).timeout(Duration::from_secs(5)).send().await
             && res.status().is_success()
             && let Ok(bytes) = res.bytes().await
             && !bytes.is_empty()
