@@ -694,7 +694,7 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     rec.extra.extend(req.rest);
     // per-protocol URLs of older builds are not read any more
     for k in ["api", "responses", "anthropic", "gemini"] {
-        rec.extra.shift_remove(k);
+        rec.extra.remove(k);
     }
     // a preset's URLs come from the catalog, not the form: a preset asks
     // only for a key

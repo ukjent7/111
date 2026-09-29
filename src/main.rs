@@ -414,7 +414,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
             let msg = "magpie: no provider configured yet — add one in the Providers tab";
             return (StatusCode::BAD_GATEWAY, msg.to_owned()).into_response();
         }
-        Some(mut t) => {
+        Some(t) => {
             // the client's key never rides along, whatever header it used
             parts.headers.remove(header::AUTHORIZATION);
             parts.headers.remove("x-api-key");
