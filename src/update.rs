@@ -119,7 +119,9 @@ async fn ask(client: &reqwest::Client, url: &str) -> Result<(String, String, Str
         .and_then(|a| {
             v["assets"].as_array()?.iter().find_map(|x| {
                 (x["name"].as_str() == Some(a))
-                    .then(|| x["browser_download_url"].as_str()?.to_owned())
+                    .then_some(x["browser_download_url"].as_str())
+                    .flatten()
+                    .map(str::to_owned)
             })
         })
         .unwrap_or_default();

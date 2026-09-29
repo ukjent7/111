@@ -1254,9 +1254,12 @@ async fn icons_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str
             .send()
             .await
             .unwrap();
-        let what = format!("{what} becomes an icon the page can show");
+        // the check's name is a 'static str, and the label has a runtime
+        // piece in it: a leak of a few bytes is fine in a test
+        let what: &'static str =
+            Box::leak(format!("{what} becomes an icon the page can show").into_boxed_str());
         checks.push(check(
-            &what,
+            what,
             (icon.starts_with("file:")
                 && served.status().is_success()
                 && served
