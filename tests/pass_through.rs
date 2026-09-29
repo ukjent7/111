@@ -389,7 +389,11 @@ async fn provider_scenario(
         check(
             "explicit slash prefix in model routes to provider and strips prefix",
             (c_prefix.path == "/b/v1/chat/completions"
-                && c_prefix.headers.get("x-provider").and_then(|v| v.to_str().ok()) == Some("b")
+                && c_prefix
+                    .headers
+                    .get("x-provider")
+                    .and_then(|v| v.to_str().ok())
+                    == Some("b")
                 && serde_json::from_slice::<serde_json::Value>(&c_prefix.body)
                     .map(|v| v["model"] == "alpha")
                     .unwrap_or(false))
@@ -399,7 +403,11 @@ async fn provider_scenario(
         check(
             "explicit colon prefix in model routes to provider and strips prefix",
             (c_colon.path == "/b/v1/chat/completions"
-                && c_colon.headers.get("x-provider").and_then(|v| v.to_str().ok()) == Some("b")
+                && c_colon
+                    .headers
+                    .get("x-provider")
+                    .and_then(|v| v.to_str().ok())
+                    == Some("b")
                 && serde_json::from_slice::<serde_json::Value>(&c_colon.body)
                     .map(|v| v["model"] == "alpha")
                     .unwrap_or(false))
@@ -409,7 +417,11 @@ async fn provider_scenario(
         check(
             "explicit path prefix routes to provider",
             (c_path.path == "/b/v1/chat/completions"
-                && c_path.headers.get("x-provider").and_then(|v| v.to_str().ok()) == Some("b")
+                && c_path
+                    .headers
+                    .get("x-provider")
+                    .and_then(|v| v.to_str().ok())
+                    == Some("b")
                 && serde_json::from_slice::<serde_json::Value>(&c_path.body)
                     .map(|v| v["model"] == "alpha")
                     .unwrap_or(false))

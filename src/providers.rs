@@ -868,9 +868,11 @@ pub fn route_for_with_provider(
     };
 
     if let Some(hint) = provider_hint {
-        if let Some(p) = cfg.providers.iter().find(|p| {
-            p.id.eq_ignore_ascii_case(hint) || p.name.eq_ignore_ascii_case(hint)
-        }) {
+        if let Some(p) = cfg
+            .providers
+            .iter()
+            .find(|p| p.id.eq_ignore_ascii_case(hint) || p.name.eq_ignore_ascii_case(hint))
+        {
             if let Some(target) = to_target(p, true) {
                 return Some(target);
             }

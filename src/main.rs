@@ -376,7 +376,8 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
                     for sep in ['/', ':'] {
                         if let Some((prefix, clean_model)) = model_val.split_once(sep) {
                             if let Some(p) = cfg.providers.iter().find(|p| {
-                                p.id.eq_ignore_ascii_case(prefix) || p.name.eq_ignore_ascii_case(prefix)
+                                p.id.eq_ignore_ascii_case(prefix)
+                                    || p.name.eq_ignore_ascii_case(prefix)
                             }) {
                                 model_provider_hint = Some(p.id.clone());
                                 obj.insert("model".to_owned(), json!(clean_model));
