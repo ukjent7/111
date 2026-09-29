@@ -155,7 +155,7 @@ impl Store {
             cache_read += r.cache_read;
             cache_write += r.cache_write;
             reasoning += r.reasoning;
-            if let Some(p) = &price {
+            if let Some((p, _)) = &price {
                 cost += p.at(r.input, r.output, r.cache_read, r.cache_write);
             } else if !r.model.is_empty() {
                 unpriced.insert(r.model.clone());

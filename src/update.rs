@@ -47,11 +47,11 @@ pub struct Snapshot {
 }
 
 #[derive(Default)]
-pub struct State {
+pub struct Update {
     inner: Mutex<Snapshot>,
 }
 
-impl State {
+impl Update {
     fn set(&self, f: impl FnOnce(&mut Snapshot)) {
         f(&mut self.inner.lock().unwrap());
     }
@@ -107,7 +107,8 @@ async fn ask(client: &reqwest::Client, url: &str) -> Result<(String, String, Str
     if !res.status().is_success() {
         return Err(format!("the release page answered {}", res.status()));
     }
-    let v: Value = res.json().await.map_err(|e| e.to_string())?;
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let tag = v["tag_name"]
         .as_str()
         .ok_or("the release names no version")?

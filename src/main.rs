@@ -71,7 +71,7 @@ pub struct App {
     /// every call's tokens, from the vendor usage reports in the answers
     pub usage: usage::Store,
     /// the update check's state, and where a download stages the new binary
-    pub update: update::State,
+    pub update: update::Update,
     pub update_path: PathBuf,
     /// the agents' sessions, read from their files and kept for a few seconds
     pub sessions: Mutex<Option<(Instant, Arc<Vec<sessions::Session>>)>>,
@@ -193,7 +193,7 @@ fn main() -> Result<()> {
         logos_dir,
         logos: Mutex::new(HashMap::new()),
         usage: usage::Store::load(usage_path),
-        update: update::State::default(),
+        update: update::Update::default(),
         update_path,
         sessions: Mutex::new(None),
         gateway: Gateway {
@@ -509,10 +509,8 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
                     providers::Auth::Google => ("x-goog-api-key", t.key.clone()),
                     providers::Auth::Bearer => ("authorization", format!("Bearer {}", t.key)),
                 };
-                if let (Ok(name), Ok(value)) =
-                    (HeaderName::from_static(name), HeaderValue::from_str(&value))
-                {
-                    parts.headers.insert(name, value);
+                if let Ok(value) = HeaderValue::from_str(&value) {
+                    parts.headers.insert(HeaderName::from_static(name), value);
                 }
             }
             if t.auth == providers::Auth::Google {
@@ -540,7 +538,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
         }
     };
 
-    let mut sent = app.client.request(parts.method, &to).headers(parts.headers);
+    let mut sent = app.client().request(parts.method, &to).headers(parts.headers);
     if !forwarded_body.is_empty() {
         sent = sent.body(forwarded_body);
     }
@@ -574,7 +572,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     // without a final poll) or when the upstream runs out of chunks
     let tee = Arc::new(Mutex::new(usage::Tee::default()));
     let usage_app = app.clone();
-    let usage_model = recorded_model.to_owned();
+    let usage_model: String = recorded_model.to_owned();
     let usage_len = upstream_res.content_length();
     let body = Body::from_stream(futures::stream::unfold(
         (

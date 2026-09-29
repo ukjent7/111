@@ -114,7 +114,7 @@ async fn run_checks() -> Vec<Check> {
     checks.extend(gemini_scenario(&client, &gateway, &mock, &captured).await);
     checks.extend(editor_scenario(&client, &gateway, &mock).await);
     checks.extend(icons_scenario(&client, &gateway, &mock).await);
-    checks.extend(import_scenario(&client, &gateway, &mock, &captured).await);
+    checks.extend(import_scenario(&client, &gateway, &captured).await);
     checks.extend(sessions_scenario(&client, &gateway).await);
     checks.extend(wiring_scenario(&client, &gateway).await);
     checks.extend(update_scenario(&client, &gateway, &config).await);
@@ -1254,8 +1254,9 @@ async fn icons_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str
             .send()
             .await
             .unwrap();
+        let what = format!("{what} becomes an icon the page can show");
         checks.push(check(
-            &format!("{what} becomes an icon the page can show"),
+            &what,
             (icon.starts_with("file:")
                 && served.status().is_success()
                 && served
@@ -1272,12 +1273,7 @@ async fn icons_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str
 
 /// Providers set up in CC Switch come over: listed with the key masked, and
 /// the imported one actually routes with the real key.
-async fn import_scenario(
-    client: &reqwest::Client,
-    gateway: &str,
-    mock_addr: &str,
-    captured: &Shared,
-) -> Vec<Check> {
+async fn import_scenario(client: &reqwest::Client, gateway: &str, captured: &Shared) -> Vec<Check> {
     let sources = get_json_raw(
         client
             .get(format!("{gateway}/api/importapps"))

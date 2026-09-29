@@ -362,7 +362,7 @@ pub async fn list(State(app): State<Arc<App>>) -> Response {
         .iter()
         .filter_map(|r| r["cwd"].as_str())
         .filter(|c| !c.is_empty())
-        .cloned()
+        .map(str::to_owned)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -500,8 +500,19 @@ pub async fn terminal(State(app): State<Arc<App>>, Json(body): Json<Value>) -> R
     let ok = match std::env::consts::OS {
         "windows" => {
             let mut cmd = std::process::Command::new("cmd");
-            cmd.arg("/C")
-                .raw_arg(format!("start \"magpie\" /D \"{cwd}\" cmd /K {resume}"));
+            // the whole line is one argument, unquoted: cmd's own quoting
+            // rules mangle it otherwise
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.raw_arg(format!(
+                    "start \"magpie\" /D \"{cwd}\" cmd /K {resume}"
+                ));
+            }
+            #[cfg(not(windows))]
+            {
+                cmd.arg(format!("start \"magpie\" /D \"{cwd}\" cmd /K {resume}"));
+            }
             cmd.spawn().is_ok()
         }
         "macos" => {

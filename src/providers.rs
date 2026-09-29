@@ -244,13 +244,15 @@ pub async fn favicon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Re
     let Some(url) = body["url"].as_str() else {
         return err(StatusCode::BAD_REQUEST, "no URL given");
     };
-    let Some(host) = reqwest::Url::parse(if url.contains("://") {
-        url
+    let full = if url.contains("://") {
+        url.to_owned()
     } else {
-        &format!("https://{url}")
-    })
-    .ok()
-    .and_then(|u| u.host_str().map(str::to_owned)) else {
+        format!("https://{url}")
+    };
+    let Some(host) = reqwest::Url::parse(&full)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+    else {
         return err(StatusCode::BAD_REQUEST, "that is not a URL");
     };
     // Google's favicon service has almost every site; the site's own
@@ -659,7 +661,7 @@ impl Provider {
 
     /// The first URL the provider declares, in chat → responses → anthropic
     /// → gemini order; the host shown in the list row is picked from it.
-    fn base_url(&self) -> &str {
+    pub fn base_url(&self) -> &str {
         [Api::Chat, Api::Responses, Api::Anthropic, Api::Gemini]
             .into_iter()
             .find_map(|api| self.url_set(api))
@@ -1129,12 +1131,14 @@ async fn tiny_request(
         Api::Anthropic => format!("{}/v1/messages", base.trim_end_matches('/')),
         Api::Chat => format!("{}/chat/completions", base.trim_end_matches('/')),
         Api::Responses => format!("{}/responses", base.trim_end_matches('/')),
+        Api::Gemini => format!("{}/models/{model}:generateContent", base.trim_end_matches('/')),
     };
     let body = match proto {
         Api::Anthropic | Api::Chat => {
             json!({ "model": model, "max_tokens": 1, "messages": [{ "role": "user", "content": "hi" }] }).to_string()
         }
         Api::Responses => json!({ "model": model, "input": "hi", "max_output_tokens": 1 }).to_string(),
+        Api::Gemini => json!({ "contents": [{ "parts": [{ "text": "hi" }] }] }).to_string(),
     };
     let mut req = client
         .post(&url)
@@ -1145,6 +1149,7 @@ async fn tiny_request(
             Api::Anthropic => req
                 .header("x-api-key", key)
                 .header("anthropic-version", "2023-06-01"),
+            Api::Gemini => req.header("x-goog-api-key", key),
             _ => req.header(header::AUTHORIZATION, format!("Bearer {key}")),
         };
     }

@@ -32,7 +32,7 @@ fn sources_meta() -> Vec<(&'static str, &'static str)> {
 }
 
 /// the first string under a key of this name, at any depth
-fn find_str(v: &Value, key: &str) -> Option<&str> {
+fn find_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     match v {
         Value::Object(o) => o
             .get(key)
@@ -80,8 +80,8 @@ fn slug(s: &str) -> String {
 /// the provider entries a config carries, whatever its exact shape: a
 /// `providers` object keyed by id, or a list — the file may wrap its apps'
 /// sections (`{"claude": …}`) one level down, so those are looked in too
-fn entries(config: &Value) -> Vec<(String, &Value)> {
-    fn scan(v: &Value, out: &mut Vec<(String, &Value)>) {
+fn entries<'a>(config: &'a Value) -> Vec<(String, &'a Value)> {
+    fn scan<'a>(v: &'a Value, out: &mut Vec<(String, &'a Value)>) {
         let Some(p) = v.get("providers") else {
             return;
         };
