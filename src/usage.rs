@@ -173,9 +173,10 @@ impl Store {
                     input: m.input + r.input,
                     output: m.output + r.output,
                     cache_read: m.cache_read + r.cache_read,
-                    cost: m.cost + price.as_ref().map_or(0.0, |(p, _)| {
-                        p.at(r.input, r.output, r.cache_read, r.cache_write)
-                    }),
+                    cost: m.cost
+                        + price.as_ref().map_or(0.0, |(p, _)| {
+                            p.at(r.input, r.output, r.cache_read, r.cache_write)
+                        }),
                     icon: icon.unwrap_or_else(|| m.icon.clone()),
                 };
             }
