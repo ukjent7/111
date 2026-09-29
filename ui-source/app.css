@@ -1284,26 +1284,13 @@ body.window .foot { padding-left: 18px; }
 .row.pref .sub { margin-top: 2px; }
 .row.pref .segs { flex: none; margin-left: auto; }
 .proxy-segs { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
-.proxy-segs input.proxy, input.words { width: 180px; min-width: 0; height: 27px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12.5px; outline: none; transition: border-color .12s, box-shadow .12s; }
-.proxy-segs input.proxy:focus, input.words:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
-.proxy-segs input.proxy::placeholder, input.words::placeholder { color: var(--faint); }
-input.words { width: 240px; max-width: 100%; }
+.proxy-segs input.proxy { width: 180px; min-width: 0; height: 27px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12.5px; outline: none; transition: border-color .12s, box-shadow .12s; }
+.proxy-segs input.proxy:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.proxy-segs input.proxy::placeholder { color: var(--faint); }
 @media (max-width: 520px) { .proxy-segs { flex-wrap: wrap; justify-content: flex-end; } }
 .prefs .val { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; min-width: 0; max-width: 60%; flex: none; }
 .prefs .val code { font-size: 12px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; padding: 0 6px; }
 .prefs .val .text { padding: 3px 6px; }
-/* the community row's way in: Discord's own colour, quiet until hovered */
-.prefs .val .discord {
-  display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 11px 0 9px; border-radius: 999px;
-  font-size: 12px; font-weight: 560; white-space: nowrap; color: #5865f2;
-  background: color-mix(in srgb, #5865f2 11%, transparent);
-  box-shadow: inset 0 0 0 .5px color-mix(in srgb, #5865f2 35%, transparent);
-  transition: background .15s, color .15s, transform .12s var(--ease);
-}
-.prefs .val .discord:hover { background: #5865f2; color: #fff; }
-.prefs .val .discord:active { transform: scale(.96); }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .prefs .val .discord:not(:hover) { color: #8b95ff; } }
-:root[data-theme="dark"] .prefs .val .discord:not(:hover) { color: #8b95ff; }
 
 
 /* ---------- motion ----------
@@ -1410,15 +1397,8 @@ body.panel .modal { padding: 16px 12px; }
 .editor.importapps .apptag { flex: none; font-size: 11px; color: var(--fg-2); background: var(--pill); border-radius: 5px; padding: 1px 6px; margin-top: 1px; }
 .editor.importapps .bar .note { font-size: 12px; color: var(--muted); }
 
-/* sync and backup, on the Settings page */
-.prefs .sub.bad { color: var(--red); }
-.prefs .sync-note .who .sub + .sub { margin-top: 2px; }
-.editor.sync-form { grid-template-columns: 86px minmax(0, 1fr); }
 .editor label.tick { display: flex; align-items: center; gap: 7px; text-align: left; padding-top: 0; color: var(--fg-2); cursor: pointer; }
 .editor label.tick input { margin: 0; }
-.editor .fname { flex: 1; min-width: 0; font-size: 12.5px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editor.sync-form .done { grid-column: 1 / -1; font-size: 12.5px; color: var(--fg-2); user-select: text; -webkit-user-select: text; }
-.editor.sync-form .bar { grid-column: 1 / -1; }
 
 /* the usual context windows under the field, one click each (#120) */
 .cxpicks { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
