@@ -672,7 +672,6 @@ body.panel .profiles #save { margin: 0; align-self: flex-start; }
 body.panel .foot { min-height: 0; padding: 5px 8px 7px 14px; border-top: 1px solid var(--line-2); }
 .pq-age { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .pq-age:not([hidden]) + .status:empty { display: none; }
-#view-agents.loading .panel-quota { visibility: hidden; }
 
 /* ---- profiles ------------------------------------------------------------- */
 .profiles { display: flex; align-items: center; gap: 10px; padding: 10px 4px 2px; min-height: 36px; flex: none; }
@@ -833,14 +832,6 @@ body.window .foot { padding-left: 18px; }
 .pv-sk-sub { width: min(260px, 64%); height: 8px; }
 .pv-sk-key { width: 64px; height: 18px; border-radius: 9px; flex: none; }
 #view-providers.loading .after-list { visibility: hidden; }
-/* the agents' rows while they are first read: the icon, the name and the two setting columns */
-.ag-sk-icon { width: 18px; height: 18px; border-radius: 5px; flex: none; }
-body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
-.ag-sk-name { width: 92px; height: 11px; }
-.ag-sk-field { height: 25px; border-radius: 6px; }
-.ag-sk-row:nth-child(2n) .ag-sk-name { width: 64px; }
-.ag-sk-row:nth-child(3n) .ag-sk-name { width: 78px; }
-#view-agents.loading .profiles { visibility: hidden; }
 .gw-sk-dot { width: 8px; height: 8px; margin: 0 7px; border-radius: 50%; flex: none; }
 .gw-sk-who { display: flex; flex-direction: column; justify-content: center; gap: 6px; }
 .gw-sk-title { width: 118px; height: 12px; }

@@ -6,8 +6,6 @@
 <title>magpie</title>
 <script src="boot.js"></script>
 <link rel="stylesheet" href="app.css">
-<link rel="stylesheet" href="routing.css">
-<link rel="stylesheet" href="library.css">
 </head>
 <body>
 <header class="top" style="--wails-draggable:drag">
@@ -16,12 +14,9 @@
     <span>magpie</span>
   </div>
   <nav class="seg" id="nav" style="--wails-draggable:no-drag">
-    <button data-view="agents" class="on" data-t>Agents</button>
-    <button data-view="providers" data-t>Providers</button>
+    <button data-view="providers" class="on" data-t>Providers</button>
     <button data-view="gateway" data-t>Gateway</button>
-    <button data-view="routing" data-t>Routing</button>
     <button data-view="usage" data-t>Usage</button>
-    <button data-view="library" data-t>Library</button>
   </nav>
   <div class="actions" style="--wails-draggable:no-drag">
     <button class="update" id="update" hidden>
@@ -44,22 +39,11 @@
 </header>
 
 <nav class="ptabs" id="ptabs" hidden>
-  <button type="button" data-ptab="agents"><span data-t>Agents</span><em id="ptabN"></em></button>
   <button type="button" data-ptab="usage"><span data-t>Usage</span></button>
   <button type="button" data-ptab="profiles"><span data-t>Profiles</span></button>
 </nav>
 
-<main class="view" id="view-agents">
-  <div class="list" id="agents"></div>
-  <section class="profiles">
-    <span class="label" data-t>Profiles</span>
-    <div id="profiles" class="chips"></div>
-    <button class="text" id="save" data-t>＋ Save current</button>
-  </section>
-  <section class="panel-quota" id="panelQuota" hidden></section>
-</main>
-
-<main class="view" id="view-providers" hidden>
+<main class="view" id="view-providers">
   <div class="list" id="providers"></div>
   <div id="excluded"></div>
   <div class="after-list">
@@ -78,13 +62,6 @@
   <div class="list" id="gwModels"></div>
   <div class="row-head"><span class="label" data-t>Recent calls</span><span class="grow"></span><span class="note" id="callsNote"></span></div>
   <div class="list activity" id="activity"></div>
-</main>
-
-<main class="view" id="view-routing" hidden>
-  <div class="row-head"><span class="label" data-t>Routing</span><span class="rt-livedot" aria-hidden="true"></span><span class="note" data-t>live, as the gateway decides</span><span class="grow"></span>
-    <button class="text rt-mask" id="rtMask" aria-pressed="false" data-tt="Mask the email addresses on this page, for a screenshot to share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.9 4.2A10.4 10.4 0 0 1 12 4c6.5 0 10 8 10 8a17.6 17.6 0 0 1-2.2 3.2M6.6 6.6C3.9 8.4 2 12 2 12s3.5 8 10 8a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M2 2l20 20"/></svg><span data-t>Hide emails</span></button></div>
-  <section class="rt" id="rt"></section>
-  <div class="rt-more" id="rtMore"></div>
 </main>
 
 <main class="view" id="view-usage" hidden>
@@ -125,8 +102,6 @@
     <p class="usage-note" id="sessNote"></p>
   </div>
 </main>
-
-<main class="view" id="view-library" hidden></main>
 
 <main class="view" id="view-settings" hidden>
   <div class="row-head"><span class="label" data-t>Preferences</span></div>
@@ -217,7 +192,5 @@
 
 <script src="i18n.js"></script>
 <script src="app.js"></script>
-<script src="routing.js"></script>
-<script src="library.js"></script>
 </body>
 </html>

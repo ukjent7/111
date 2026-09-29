@@ -82,7 +82,7 @@ try {
     await page.goto(`http://127.0.0.1:${port}/?shell=1`, { waitUntil: 'load' });
     await page.waitForTimeout(1500);
     const brand = await page.textContent('.brand span:last-child');
-    for (const tab of ['Providers', 'Gateway', 'Routing', 'Usage', 'Library', 'Agents']) {
+    for (const tab of ['Providers', 'Gateway', 'Usage']) {
       await page.click(`#nav button:has-text("${tab}")`, { timeout: 5000 }).catch((e) => errors.push(`click ${tab}: ${e.message}`));
       await page.waitForTimeout(800);
     }
@@ -169,10 +169,10 @@ try {
   await browser.close();
 }
 
-const report = { tabs: 6, customTileFirst, catalogFromCache, catalogLoadingTiles, errors, passed };
+const report = { tabs: 3, customTileFirst, catalogFromCache, catalogLoadingTiles, errors, passed };
 fs.writeFileSync('ui-smoke-report.json', JSON.stringify(report, null, 2));
 if (!report.passed) {
   console.error(`UI smoke failed:\n${errors.join('\n')}`);
   process.exit(1);
 }
-console.log('UI smoke passed: six tabs, catalog cached and loading states as designed');
+console.log('UI smoke passed: three tabs, catalog cached and loading states as designed');

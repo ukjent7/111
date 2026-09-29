@@ -29,7 +29,7 @@ if (window.bootPrefs) {
 let state = { agents: [], profiles: [], catalog: "", settings: {} };
 let prefs = null; // the settings page: theme, lang, version, dir, gateway
 let providers = null; // { providers, presets, gateway }
-let view = "agents";
+let view = "providers";
 let showAllAgents = false; // the agents no one has set anything on, folded away
 let period = "30d"; // usage window
 let usage = null;   // last usage summary
@@ -157,573 +157,7 @@ function optionFor(field, value) {
   return field.options.find((o) => o.value === value);
 }
 
-// Rows in the shape of the list while magpie first reads the agents; a
-// reload keeps the rows it has until the new ones are in.
-function renderAgentsLoading() {
-  const page = $("#view-agents");
-  page.classList.add("loading");
-  page.setAttribute("aria-busy", "true");
-  const list = $("#agents");
-  list.replaceChildren();
-  for (let i = 0; i < 5; i++) {
-    const row = el("div", "row agent ag-sk-row");
-    const who = el("div", "who");
-    who.append(el("span", "skeleton ag-sk-name"));
-    const fields = el("div", "fields");
-    fields.append(el("span", "skeleton ag-sk-field"), el("span", "skeleton ag-sk-field"));
-    row.append(el("span", "skeleton ag-sk-icon"), who, fields);
-    list.append(row);
-  }
-}
-
-function renderAgents() {
-  const page = $("#view-agents");
-  page.classList.remove("loading");
-  page.removeAttribute("aria-busy");
-  const list = $("#agents");
-  list.replaceChildren();
-  if (!state.agents.length) {
-    const e = el("div", "empty-state");
-    e.append(el("b", "", t("No agents found")), el("span", "", t("Install Claude Code, Codex, Gemini CLI, OpenCode… and magpie will list them here.")));
-    list.append(e);
-  }
-  const { shown: used, folded } = arrangeAgents();
-  if (mode === "panel") $("#ptabN").textContent = state.agents.length || "";
-  const agentRow = (a, inFold) => {
-    const row = el("div", "row agent");
-    row.dataset.id = a.id;
-    row.title = a.path;
-    row.oncontextmenu = (ev) => { ev.preventDefault(); openAgentMenu(row.querySelector(".ag-handle"), a, inFold); };
-    const who = el("div", "who");
-    who.append(el("div", "name", a.name));
-    // the model picker takes the wide column, everything else the narrow one,
-    // so the controls line up down the list
-    const fields = el("div", "fields");
-    const wide = (f) => f.label === "model" || f.label === "large";
-    const shownFields = a.fields.filter((f) => !TIERS.includes(f.label));
-    const tiers = tierMenu(a);
-    if (tiers) shownFields.push(tiers);
-    const sorted = shownFields.sort((x, y) => wide(y) - wide(x) || extra(x) - extra(y));
-    const plain = sorted.filter((f) => !extra(f)).length;
-    // the squares share one cell, side by side: two (Codex's subagents and
-    // sign-in) wrapped the second under the first
-    const extras = el("span", "extras-cell");
-    for (const f of sorted) {
-      if (extra(f)) { extras.append(extraField(a, f)); continue; }
-      const b = el("button", "field " + (plain === 1 ? "solo" : wide(f) ? "main" : "side"));
-      const opt = optionFor(f, f.value);
-      b.title = t("{label}: {value}", { label: t(f.label), value: f.value || t("agent default") }) + (opt?.note ? ` · ${opt.note}` : "");
-      const effort = f.key === "effort" || f.label === "effort" || f.label === "thinking";
-      if (opt?.icon || opt?.icons?.length) b.append(optionIcon(opt));
-      // a field with no logo of its own still leads with an icon: how much
-      // effort, or the agent's own for its default, as the picker shows it
-      else if (effort) b.append(effortIcon(f));
-      else if (!f.value && !f.menu && a.icon) b.append(icon(a.icon));
-      else if (!wide(f) || !f.value) b.append(el("span", "k", t(f.label)));
-      const shown = f.menu ? f.summary : effort ? effortName(opt || { value: f.value }) : (opt?.label || f.value || t(FOLLOWS_MODEL.includes(f.label) ? "same as model" : "default"));
-      if (f.menu) b.title = f.options.map((o) => `${o.label}: ${o.note}`).join("\n");
-      b.append(el("span", "v" + (f.value || f.custom ? "" : " empty"), shown));
-      const c = el("span", "chev");
-      c.append(svg(CHEV, 11, 1.7));
-      b.append(c);
-      b.dataset.key = f.key;
-      b.onclick = (ev) => openPicker(a, f, b, ev);
-      fields.append(b);
-    }
-    if (extras.childNodes.length) fields.append(extras);
-    // an app that takes magpie by a link of its own (Cindy) has nothing to
-    // pick: its row opens the link, and the app asks to add magpie
-    if (a.import && mode !== "panel") fields.append(importButton(a));
-    // the panel shows what's set as words, and a row's controls only
-    // once it's opened: one row at a time, in place
-    let sum = null, openBox = null;
-    const effortOf = (f) => f.key === "effort" || f.label === "effort" || f.label === "thinking";
-    if (mode === "panel" && a.import) {
-      // in words like the rest, the row itself the link
-      sum = el("span", "ag-sum");
-      sum.append(el("span", "v" + (a.added ? "" : " empty"), a.added ? "magpie" : t("Add magpie")), el("span"));
-      const c = el("span", "chev");
-      c.append(svg(OUT, 10, 1.6));
-      sum.append(c);
-      row.title = importButton(a).title;
-      row.onclick = (ev) => {
-        if (ev.target.closest(".ag-handle, .ag-fix, .ag-show")) return;
-        importButton(a).click();
-      };
-    } else if (mode === "panel") {
-      sum = el("span", "ag-sum");
-      const main = sorted.find((f) => !extra(f) && !f.menu && !effortOf(f));
-      const opt = main && optionFor(main, main.value);
-      // the model in words, its logo coming in beside them on hover
-      const v = el("span", "v" + (main?.value ? "" : " empty"));
-      if (main?.value && (opt?.icon || opt?.icons?.length)) {
-        const mi = el("span", "mi");
-        mi.setAttribute("aria-hidden", "true");
-        mi.append(el("span", "mi-in"));
-        mi.firstChild.append(optionIcon(opt));
-        // its width to open to, read as the pointer comes onto the row:
-        // before :hover is styled, so the box eases open from nothing
-        row.addEventListener("pointerenter", () => {
-          if (!mi.style.getPropertyValue("--w")) mi.style.setProperty("--w", mi.firstChild.offsetWidth + "px");
-        });
-        v.append(mi);
-      }
-      v.append(el("span", "vt", main ? (opt?.label || main.value || t("default")) : ""));
-      sum.append(v);
-      // how much effort as three bars, in a column of its own down the list:
-      // none lit for the default, or for an agent that has no such setting
-      const ef = a.fields.find(effortOf);
-      sum.append(effortBars(ef));
-      const c = el("span", "chev");
-      c.append(svg(CHEV, 10, 1.6));
-      sum.append(c);
-      // opened: each setting on a line of its own, named, and the effort as
-      // its levels side by side
-      // .ag-in clips while the row opens or closes, .ag-body holds the lines
-      openBox = el("div", "ag-open");
-      const body = el("div", "ag-body");
-      openBox.append(el("div", "ag-in"));
-      openBox.firstChild.append(body);
-      for (const b of [...fields.querySelectorAll(":scope > .field")]) {
-        const f = sorted.find((x) => x.key === b.dataset.key) || (b.dataset.key === "tiers" ? tiers : null);
-        if (f && effortOf(f)) { body.append(effortSeg(a, f)); continue; }
-        if (f && !b.querySelector(":scope > .k")) b.prepend(el("span", "k", t(f.label)));
-        body.append(b);
-      }
-      if (extras.childNodes.length) body.append(extras);
-      row.classList.toggle("open", panelOpenAgent === a.id);
-      row.setAttribute("aria-expanded", String(panelOpenAgent === a.id));
-      row.onclick = (ev) => {
-        if (ev.target.closest(".ag-open, .ag-handle, .ag-fix, .ag-show")) return;
-        const open = panelOpenAgent !== a.id;
-        panelOpenAgent = open ? a.id : null;
-        // the rows ease open and shut, and the panel's edge moves with them:
-        // it goes now to where they will be, over the same time and curve
-        let grow = open ? openBox.querySelector(".ag-body").offsetHeight : 0;
-        for (const r of $("#agents").querySelectorAll(".row.agent.open")) {
-          grow -= r.querySelector(".ag-in")?.offsetHeight || 0;
-          r.classList.remove("open");
-          r.setAttribute("aria-expanded", "false");
-        }
-        row.classList.toggle("open", open);
-        row.setAttribute("aria-expanded", String(open));
-        fit(grow, open ? ROW_OPEN : ROW_CLOSE);
-        const settle = (ev) => {
-          if (ev.target !== openBox || ev.propertyName !== "grid-template-rows") return;
-          openBox.removeEventListener("transitionend", settle);
-          fit();
-        };
-        openBox.addEventListener("transitionend", settle);
-      };
-    }
-    // one hidden by hand gives its way back in words, rather than being a
-    // greyed row whose way back is its menu. One nothing is set on isn't
-    // hidden: setting something on it brings it up the list.
-    if (inFold && isHidden(a)) {
-      row.classList.add("put-away");
-      const back = el("button", "ag-show");
-      back.type = "button";
-      back.title = t("Hidden by you · show it in the list again");
-      back.append(svg(EYE, 12, 1.5), el("span", "", t("Show")));
-      back.onclick = (e) => { e.stopPropagation(); setAgentHidden(a, false); };
-      who.append(back);
-    }
-    // on the name's own line, so the row keeps its height and the pickers
-    // their columns
-    if (a.drift) {
-      row.classList.add("drifted");
-      who.append(driftFix(a));
-    }
-    row.append(agentHandle(a, row, inFold), who);
-    if (sum) row.append(sum, ...(openBox ? [openBox] : []));
-    else row.append(fields);
-    return row;
-  };
-  // the extras column is there for every row once any agent has one, so the
-  // pickers keep lining up down the list
-  list.classList.toggle("extras", state.agents.some((a) => a.fields.some(extra) || tierMenu(a)));
-  // as wide as the row with the most squares
-  list.style.setProperty("--extras", Math.max(1, ...state.agents.map((a) => a.fields.filter((f) => extra(f) && !TIERS.includes(f.label)).length + (tierMenu(a) ? 1 : 0))));
-  if (!folded.length) {
-    for (const a of used) list.append(agentRow(a));
-  } else {
-    // the ones in use stay put; the rest unroll beneath them like a scroll
-    for (const a of used) list.append(agentRow(a));
-    const fold = el("div", "agent-fold" + (showAllAgents ? " open" : ""));
-    const inner = el("div", "agent-fold-inner");
-    inner.inert = !showAllAgents;
-    fold.style.setProperty("--n", folded.length);
-    // the ones hidden by hand, then the ones nothing is set on, each under
-    // a line that says which they are
-    const byHand = folded.filter(isHidden), unset = folded.filter((a) => !isHidden(a));
-    let i = 0;
-    for (const [group, cap] of [[byHand, "Hidden"], [unset, "Not set up"]]) {
-      if (!group.length) continue;
-      const c = el("div", "agent-fold-cap", t(cap));
-      c.style.setProperty("--i", i);
-      inner.append(c);
-      for (const a of group) {
-        const row = agentRow(a, true);
-        row.style.setProperty("--i", i++);
-        inner.append(row);
-      }
-    }
-    fold.append(inner);
-    const more = el("button", "agent-more");
-    const label = el("span", "", "");
-    const chev = el("span", "chev");
-    chev.append(svg(CHEV, 10, 1.8));
-    more.append(label, chev);
-    const labelFor = () => {
-      // what is folded, and how many of them were hidden by hand
-      label.textContent = showAllAgents ? t("Show less")
-        : !unset.length ? t("{n} hidden agents", { n: byHand.length })
-        : byHand.length ? t("Show {n} more ({h} hidden)", { n: folded.length, h: byHand.length })
-        : t("Show {n} more", { n: folded.length });
-      more.setAttribute("aria-expanded", String(showAllAgents));
-    };
-    labelFor();
-    // settled: the soft edge goes, and a folded scroll gives the panel its room
-    // back. A hidden window never ends its transition, so a timer backs it up.
-    let settle;
-    const settled = () => {
-      clearTimeout(settle);
-      fold.classList.remove("moving");
-      fit();
-    };
-    fold.addEventListener("transitionend", (e) => { if (e.target === fold) settled(); });
-    more.onclick = () => {
-      showAllAgents = !showAllAgents;
-      // the panel's edge moves with the scroll, on the same beat and curve
-      const room = inner.scrollHeight;
-      fit(showAllAgents ? room : -room, showAllAgents ? UNROLL : ROLLUP);
-      clearTimeout(settle);
-      settle = setTimeout(settled, 900);
-      fold.classList.add("moving");
-      fold.classList.toggle("open", showAllAgents);
-      inner.inert = !showAllAgents;
-      labelFor();
-      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        label.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.22, 1, .36, 1)" });
-      }
-    };
-    list.append(fold, more);
-  }
-
-  const chips = $("#profiles");
-  chips.replaceChildren();
-  if (!state.profiles.length) chips.append(el("span", "hint", t("none yet · save the setup to switch back in one click")));
-  for (const p of state.profiles) {
-    const c = el("button", "chip");
-    const lib = profileLibrary(p.library);
-    c.title = [p.summary, lib].filter(Boolean).join("\n");
-    c.append(el("span", "", p.name));
-    if (lib) c.append(el("span", "lib"));
-    // the setup as it is now, saved over this profile
-    const u = el("span", "x", "↻");
-    u.title = t("Update to the current setup");
-    u.onclick = (ev) => { ev.stopPropagation(); profileAction("save", p.name, true); };
-    const x = el("span", "x", "×");
-    x.title = t("Delete profile");
-    x.onclick = (ev) => { ev.stopPropagation(); profileAction("delete", p.name); };
-    c.append(u, x);
-    c.onclick = () => profileAction("use", p.name);
-    chips.append(c);
-  }
-  fit(0, agentsGlide);
-  agentsGlide = null;
-}
-
-// driftNote: under the name of an agent whose config something else
-// rewrote since magpie set it — the row still shows a magpie model while the
-// agent no longer reaches magpie, or it was put back on a model of its own —
-// what happened, and the one click that sets it again.
-// driftFix is the one thing a drifted agent shows: an amber pill after its
-// name that sets magpie's settings again. What is off is its tooltip; taking
-// the config as it is now is in the row's menu.
-function driftFix(a) {
-  const d = a.drift, f = a.fields.find((x) => x.key === d.field);
-  const want = (f && optionFor(f, d.want)?.label) || d.want;
-  const fix = el("button", "ag-fix");
-  fix.type = "button";
-  fix.title = `${t(DRIFT_WHY[d.kind] || DRIFT_WHY.unwired, { agent: a.name, model: want })}\n${d.detail}`;
-  fix.setAttribute("aria-label", t("Apply again"));
-  fix.append(svg(REAPPLY, 11, 1.8), el("span", "", t("Apply again")));
-  fix.onclick = (e) => { e.stopPropagation(); reapplyAgent(a, fix); };
-  return fix;
-}
-
-const DRIFT_WHY = {
-  unwired: "{agent} no longer goes through magpie — its config was changed",
-  replaced: "{agent} was switched off {model} outside magpie",
-  bypassed: "{agent} was used without going through magpie — restart it after applying",
-};
-
-const REAPPLY = "M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3.25h-3.25";
-
-async function keepAgent(a) {
-  try { state = await api("agents/keep/" + a.id, {}); renderAgents(); } catch (e) { status(e.message, "err"); }
-}
-
-// reapplyAgent writes what magpie set on the agent into its config again.
-async function reapplyAgent(a, btn) {
-  btn?.classList.add("busy");
-  try {
-    state = await api("agents/reapply/" + a.id, {});
-    renderAgents();
-    document.querySelector(`.agent[data-id="${CSS.escape(a.id)}"] .field`)?.classList.add("flash");
-    const msg = t("{agent} goes through magpie again", { agent: a.name });
-    if (state.notice) status(`${msg}. ${state.notice}`, "warn", 9000);
-    else status(msg, "ok");
-  } catch (e) {
-    btn?.classList.remove("busy");
-    status(e.message, "err");
-  }
-}
-
-// ---------- the agents' order, and the ones put away ----------
-// Kept in magpie's own settings (agentOrder, agentsHidden, agentsShown),
-// never in an agent's files. An agent the order doesn't name — one
-// installed since — follows the ordered ones, in magpie's own order.
-
-let agentsGlide = null; // how the panel's edge moves after the next render
-let panelOpenAgent = null; // the one agent row the panel has opened
-
-const agentUsed = (a) => a.added || a.fields.some((f) => f.value);
-
-// importButton: the one control of an app magpie is added to by its import
-// link: magpie, once the app has it, or an offer to add it
-function importButton(a) {
-  const b = el("button", "field solo import");
-  b.type = "button";
-  b.title = a.added
-    ? t("{name} has magpie as a provider · click to add it again", { name: a.name })
-    : t("Opens {name} to add magpie as a provider — confirm it there", { name: a.name });
-  b.append(icon("magpie"), el("span", "v" + (a.added ? "" : " empty"), a.added ? "magpie" : t("Add magpie")));
-  const c = el("span", "chev");
-  c.append(svg(OUT, 11, 1.6));
-  b.append(c);
-  b.onclick = (ev) => {
-    ev.stopPropagation();
-    if (web) location.href = a.import;
-    else api("open", { url: a.import });
-  };
-  return b;
-}
-const isHidden = (a) => (state.settings?.agentsHidden || []).includes(a.id);
-
-// arrangeAgents: the rows in view, in order, and the folded rest. Folded is
-// what was hidden by hand, and what nothing is set on — noise in a picker —
-// unless it was shown by hand or nothing is set on any (a fresh magpie has
-// nothing to show otherwise).
-function arrangeAgents() {
-  const s = state.settings || {};
-  const order = s.agentOrder || [], hidden = new Set(s.agentsHidden || []);
-  const rank = (a) => { const i = order.indexOf(a.id); return i < 0 ? order.length : i; };
-  const all = state.agents.map((a, i) => [a, i]).sort(([x, i], [y, j]) => rank(x) - rank(y) || i - j).map(([a]) => a);
-  const anyUsed = all.some((a) => !hidden.has(a.id) && agentUsed(a));
-  // what is set on it alone decides where one not hidden goes: pinned in view
-  // by hand, one cleared stayed up among the set ones with nothing to say why
-  const inView = (a) => !hidden.has(a.id) && (!anyUsed || agentUsed(a));
-  return { all, shown: all.filter(inView), folded: all.filter((a) => !inView(a)) };
-}
-
-async function saveArrangement(order, hidden, shown) {
-  const prev = state.settings;
-  state.settings = { ...prev, agentOrder: order, agentsHidden: hidden, agentsShown: shown };
-  renderAgents();
-  try {
-    const s = await api("agents/arrange", { order, hidden, shown });
-    state.settings = { ...state.settings, agentOrder: s.agentOrder || [], agentsHidden: s.agentsHidden || [], agentsShown: s.agentsShown || [] };
-  } catch (e) {
-    state.settings = prev;
-    renderAgents();
-    status(e.message, "err");
-  }
-}
-
-// moveAgent puts the agent at index `to` among the rows in view; the folded
-// ones keep their places after them.
-function moveAgent(id, to) {
-  const { shown, folded } = arrangeAgents();
-  const ids = shown.map((a) => a.id);
-  const from = ids.indexOf(id);
-  if (from < 0 || to < 0 || to >= ids.length || to === from) return;
-  ids.splice(to, 0, ...ids.splice(from, 1));
-  const s = state.settings || {};
-  saveArrangement([...ids, ...folded.map((a) => a.id)], s.agentsHidden || [], []);
-}
-
-function setAgentHidden(a, hide) {
-  const s = state.settings || {};
-  const { all } = arrangeAgents();
-  let hidden = (s.agentsHidden || []).filter((x) => x !== a.id);
-  if (hide) hidden.push(a.id);
-  // the rows that change go on the panel's edge, as the fold does
-  agentsGlide = hide ? ROLLUP : UNROLL;
-  saveArrangement(all.map((x) => x.id), hidden, []);
-  // hidden, it says where it went, since the row goes out of sight
-  status(t(hide ? "{agent} hidden · find it under Hidden at the bottom" : "{agent} shown", { agent: a.name }), "ok", hide ? 4000 : 1800);
-}
-
-const ALT = /^Mac/.test(navigator.platform) ? "⌥" : "Alt+";
-const GRIP = "M6 4h.01M10 4h.01M6 8h.01M10 8h.01M6 12h.01M10 12h.01";
-const EYE_OFF = "M6.6 3.7A6.9 6.9 0 0 1 8 3.5c3.75 0 6.25 4.5 6.25 4.5a11 11 0 0 1-1.5 2M4.4 4.4C2.7 5.55 1.75 8 1.75 8S4.25 12.5 8 12.5c1.2 0 2.25-.45 3.1-1.05M6.75 6.75a1.75 1.75 0 0 0 2.5 2.5M2 2l12 12";
-const EYE = "M1.75 8S4.25 3.5 8 3.5 14.25 8 14.25 8 11.75 12.5 8 12.5 1.75 8 1.75 8ZM8 9.75a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5Z";
-
-// agentHandle is the row's logo, which is also its handle: drag it to move
-// the row, click it (or right-click the row) for Move up, Move down and
-// Hide; Alt+↑/↓ moves it from the keyboard.
-function agentHandle(a, row, inFold) {
-  const b = el("button", "ag-handle");
-  b.type = "button";
-  b.setAttribute("aria-label", t("Arrange {agent}", { agent: a.name }));
-  b.setAttribute("aria-haspopup", "menu");
-  b.title = inFold ? t(isHidden(a) ? "Show {agent}" : "Hide {agent}", { agent: a.name }) : t("Drag to reorder · click to move or hide");
-  const grip = el("span", "grip");
-  grip.append(svg(GRIP, 14, 2.4));
-  b.append(icon(a.icon), grip);
-  b.onkeydown = (e) => {
-    if (inFold || !e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
-    e.preventDefault();
-    const { shown } = arrangeAgents();
-    const i = shown.findIndex((x) => x.id === a.id);
-    moveAgent(a.id, i + (e.key === "ArrowUp" ? -1 : 1));
-    // the rows were drawn anew: keep the keyboard on this one
-    $(`#agents .row.agent[data-id="${CSS.escape(a.id)}"] .ag-handle`)?.focus();
-  };
-  b.onclick = (e) => { if (!b.dataset.dragged) openAgentMenu(b, a, inFold); delete b.dataset.dragged; };
-  if (!inFold) b.onpointerdown = (e) => dragAgent(e, b, row);
-  return b;
-}
-
-// dragAgent moves a row in view up and down the list with the pointer; the
-// others make room as it passes, and letting go keeps the new order.
-function dragAgent(e, handle, row) {
-  if (e.button !== 0) return;
-  const list = $("#agents");
-  const rows = [...list.children].filter((r) => r.classList.contains("agent"));
-  if (rows.length < 2) return;
-  const y0 = e.clientY, from = rows.indexOf(row);
-  const tops = rows.map((r) => r.offsetTop), h = row.offsetHeight;
-  let dragging = false, to = from;
-  const move = (ev) => {
-    const dy = ev.clientY - y0;
-    if (!dragging) {
-      if (Math.abs(dy) < 4) return;
-      dragging = true;
-      handle.dataset.dragged = "1";
-      closeAgentMenu();
-      list.classList.add("sorting");
-      row.classList.add("dragging");
-    }
-    // the row follows the pointer, kept within the list
-    const min = tops[0] - tops[from], max = tops[rows.length - 1] + rows[rows.length - 1].offsetHeight - h - tops[from];
-    const d = Math.max(min, Math.min(max, dy));
-    row.style.transform = `translateY(${d}px)`;
-    const mid = tops[from] + d + h / 2;
-    // past the middle of a row below (or above), the dragged one takes its place
-    if (d > 0) to = rows.slice(from + 1).filter((r, k) => mid >= tops[from + 1 + k] + r.offsetHeight / 2).length + from;
-    else to = from - rows.slice(0, from).filter((r, k) => mid <= tops[k] + r.offsetHeight / 2).length;
-    rows.forEach((r, i) => {
-      if (i === from) return;
-      const shift = i > from && i <= to ? -h : i < from && i >= to ? h : 0;
-      r.style.transform = shift ? `translateY(${shift}px)` : "";
-    });
-  };
-  const up = () => {
-    handle.removeEventListener("pointermove", move);
-    handle.removeEventListener("pointerup", up);
-    handle.removeEventListener("pointercancel", up);
-    if (!dragging) return;
-    // the row lands where it was let go, then the list is drawn in the new order
-    row.classList.remove("dragging");
-    row.classList.add("landing");
-    row.style.transform = `translateY(${tops[to] - tops[from] + (to > from ? rows[to].offsetHeight - h : 0)}px)`;
-    setTimeout(() => {
-      list.classList.remove("sorting");
-      moveAgent(row.dataset.id, to);
-      if (to === from) renderAgents();
-      setTimeout(() => delete handle.dataset.dragged, 0);
-    }, 160);
-  };
-  handle.setPointerCapture(e.pointerId);
-  handle.addEventListener("pointermove", move);
-  handle.addEventListener("pointerup", up);
-  handle.addEventListener("pointercancel", up);
-}
-
-let agentMenu = null;
-function closeAgentMenu() {
-  if (!agentMenu) return;
-  agentMenu.anchor.classList.remove("open");
-  agentMenu.box.remove();
-  document.removeEventListener("mousedown", agentMenu.outside, true);
-  document.removeEventListener("keydown", agentMenu.keys, true);
-  document.removeEventListener("scroll", closeAgentMenu, true);
-  removeEventListener("resize", closeAgentMenu);
-  agentMenu = null;
-}
-function openAgentMenu(anchor, a, inFold) {
-  if (!anchor) return;
-  const again = agentMenu?.anchor === anchor;
-  closeAgentMenu();
-  if (again) return;
-  const { shown } = arrangeAgents();
-  const i = shown.findIndex((x) => x.id === a.id);
-  const acts = inFold && isHidden(a)
-    ? [{ name: "Show", icon: EYE, run: () => setAgentHidden(a, false) }]
-    : inFold
-    ? [{ name: "Hide", icon: EYE_OFF, run: () => setAgentHidden(a, true) }]
-    : [
-        { name: "Move up", icon: "M8 12.5v-9M4 7.25l4-3.75 4 3.75", key: ALT + "↑", off: i <= 0, run: () => moveAgent(a.id, i - 1) },
-        { name: "Move down", icon: "M8 3.5v9M4 8.75l4 3.75 4-3.75", key: ALT + "↓", off: i < 0 || i >= shown.length - 1, run: () => moveAgent(a.id, i + 1) },
-        // for a config rewritten in a way magpie can't see: set it again anyway
-        ...(a.drift || a.fields.some((f) => optionFor(f, f.value)?.ref) ? [{ name: "Apply again", icon: REAPPLY, sep: true, run: () => reapplyAgent(a) }] : []),
-        ...(a.drift?.kind === "replaced" ? [{ name: "Keep current settings", icon: CHECK, run: () => keepAgent(a) }] : []),
-        { name: "Hide", icon: EYE_OFF, sep: true, run: () => setAgentHidden(a, true) },
-      ];
-  const box = el("div", "pop row-menu");
-  box.setAttribute("role", "menu");
-  const items = [];
-  for (const o of acts) {
-    if (o.sep) box.append(el("div", "rm-sep"));
-    const b = el("button", "rm-item");
-    b.type = "button";
-    b.setAttribute("role", "menuitem");
-    b.disabled = !!o.off;
-    b.append(svg(o.icon, 13, 1.5), el("span", "rm-name", t(o.name)));
-    if (o.key) b.append(el("span", "rm-key", o.key));
-    b.onclick = (e) => { e.stopPropagation(); closeAgentMenu(); o.run(); };
-    b.onmouseenter = () => b.focus({ preventScroll: true });
-    box.append(b);
-    if (!o.off) items.push(b);
-  }
-  document.body.append(box);
-  const r = anchor.getBoundingClientRect(), w = box.offsetWidth, hh = box.offsetHeight, pad = 8;
-  let y = r.bottom + 5;
-  if (y + hh > innerHeight - pad && r.top - 5 - hh >= pad) { y = r.top - 5 - hh; box.classList.add("up"); }
-  box.style.left = Math.max(pad, Math.min(r.left - 4, innerWidth - w - pad)) + "px";
-  box.style.top = Math.max(pad, y) + "px";
-  anchor.classList.add("open");
-  const outside = (e) => { if (!box.contains(e.target) && !anchor.contains(e.target)) closeAgentMenu(); };
-  const keys = (e) => {
-    const k = items.indexOf(document.activeElement);
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeAgentMenu(); anchor.focus(); }
-    else if (e.key === "Tab") closeAgentMenu();
-    else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && items.length) {
-      e.preventDefault(); e.stopPropagation();
-      const n = items.length, at = k < 0 ? (e.key === "ArrowDown" ? n - 1 : 0) : k;
-      items[(at + (e.key === "ArrowDown" ? 1 : n - 1)) % n].focus();
-    }
-  };
-  document.addEventListener("mousedown", outside, true);
-  document.addEventListener("keydown", keys, true);
-  document.addEventListener("scroll", closeAgentMenu, true);
-  addEventListener("resize", closeAgentMenu);
-  agentMenu = { box, anchor, outside, keys };
-  items[0]?.focus({ preventScroll: true });
-}
+function renderAgents() {}
 
 // Claude Code's opus/sonnet/haiku/fable can each have a model of their own
 // once it runs through magpie. They share one button, which lists the four;
@@ -742,36 +176,6 @@ const EXTRA_GLYPH = {
   tiers: "M8 2.6 2.75 5.4 8 8.2l5.25-2.8zM2.75 8.1 8 10.9l5.25-2.8M2.75 10.8 8 13.6l5.25-2.8",
   "sign-in": "M8 2.5a2.75 2.75 0 1 1 0 5.5 2.75 2.75 0 0 1 0-5.5zM3 13.5c.4-2.4 2.4-3.9 5-3.9s4.6 1.5 5 3.9",
 };
-function extraField(a, f) {
-  const set = !!(f.value || f.custom);
-  const b = el("button", "field extra" + (set ? " set" : ""));
-  b.append(svg(EXTRA_GLYPH[f.label] || EXTRA_GLYPH.tiers, 13, 1.5));
-  const opt = optionFor(f, f.value);
-  b.title = f.menu
-    ? t("{label}: {value}", { label: t(f.label), value: f.summary }) + "\n" + f.options.map((o) => `${o.label}: ${o.note}`).join("\n")
-    : t("{label}: {value}", { label: t(f.label), value: t(opt?.label || f.value || "same as model") }) + (opt?.note && !FOLLOWS_MODEL.includes(f.label) ? "\n" + t(opt.note) : "");
-  b.setAttribute("aria-label", b.title);
-  b.dataset.key = f.key;
-  b.onclick = (ev) => openPicker(a, f, b, ev);
-  return b;
-}
-
-function tierMenu(a) {
-  const tiers = a.fields.filter((f) => TIERS.includes(f.label));
-  if (!tiers.length || !tiers.some((f) => f.options.length)) return null;
-  const main = a.fields.find((f) => f.key === "model");
-  const mainName = optionFor(main, main.value)?.label || main.value;
-  const custom = tiers.filter((f) => f.value);
-  const name = (f) => optionFor(f, f.value)?.label || f.value;
-  return {
-    key: "tiers", label: "tiers", value: "", menu: true, custom: custom.length > 0,
-    summary: custom.length ? custom.map((f) => f.label).join(", ") : t("same as model"),
-    options: tiers.map((f) => ({
-      value: f.key, label: f.label, icon: optionFor(f, f.value)?.icon || optionFor(main, main.value)?.icon,
-      note: f.value ? name(f) : t("same as model ({model})", { model: mainName }),
-    })),
-  };
-}
 
 // The tray panel has no scrollbars to speak of, so it grows to fit instead.
 // The agents' scroll unrolls and rolls up on these, in app.css as in the
@@ -823,7 +227,7 @@ if (mode === "panel") {
 // glide moves the panel's edge there over time instead of at once.
 function fit(extra = 0, glide) {
   if (mode !== "panel") return;
-  const h = $(".top").offsetHeight + $("#ptabs").offsetHeight + $("#agents").offsetHeight + $(".profiles").offsetHeight + $("#panelQuota").offsetHeight + $(".foot").offsetHeight + 4 + extra;
+  const h = $(".top").offsetHeight + ($("#ptabs")?.offsetHeight || 0) + ($("#agents")?.offsetHeight || 0) + ($(".profiles")?.offsetHeight || 0) + ($("#panelQuota")?.offsetHeight || 0) + $(".foot").offsetHeight + 4 + extra;
   if (h === fit.last) return;
   fit.last = h;
   const still = !glide || matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -831,7 +235,6 @@ function fit(extra = 0, glide) {
 }
 
 async function load() {
-  if (!load.done) renderAgentsLoading();
   // the gateway page too waits for the state first: its skeleton, not a
   // blank page, until then (#123)
   if (view === "providers" && !providers) renderProvidersLoading();
@@ -844,10 +247,7 @@ async function load() {
     if (!prefsSettled(since) && load.done) next.settings = state.settings;
     state = next;
     load.done = true;
-    // the library may have drawn itself before the saved language was known
-    if (applyPrefs(state.settings) && view === "library") window.loadLibrary?.();
     tintPanel();
-    renderAgents();
     if (mode === "panel") { renderPanelQuota(); loadQuotas(); }
     // an open provider editor is someone typing: coming back to the window
     // must not rebuild it under them
@@ -1434,20 +834,23 @@ async function profileAction(action, name, update) {
   }
 }
 
-$("#save").onclick = () => {
-  const chips = $("#profiles");
-  if (chips.querySelector(".chip-input")) return;
-  const input = el("input", "chip-input");
-  input.placeholder = t("Profile name");
-  input.onkeydown = (e) => {
-    if (e.key === "Enter" && input.value.trim()) profileAction("save", input.value.trim());
-    else if (e.key === "Escape") input.remove();
-    e.stopPropagation();
+const saveBtn = $("#save");
+if (saveBtn) {
+  saveBtn.onclick = () => {
+    const chips = $("#profiles");
+    if (!chips || chips.querySelector(".chip-input")) return;
+    const input = el("input", "chip-input");
+    input.placeholder = t("Profile name");
+    input.onkeydown = (e) => {
+      if (e.key === "Enter" && input.value.trim()) profileAction("save", input.value.trim());
+      else if (e.key === "Escape") input.remove();
+      e.stopPropagation();
+    };
+    input.onblur = () => setTimeout(() => input.remove(), 100);
+    chips.prepend(input);
+    input.focus();
   };
-  input.onblur = () => setTimeout(() => input.remove(), 100);
-  chips.prepend(input);
-  input.focus();
-};
+}
 
 // ---------- providers view ----------
 //
@@ -4270,14 +3673,14 @@ function planSpan(q) {
   return s;
 }
 
-// The tray panel is three tabs over the one page: the agents, the usage of
-// every subscription and key, and the saved profiles. The tab is remembered.
-let panelTab = "agents";
-try { panelTab = localStorage.getItem("magpie.panelTab") || "agents"; } catch {}
+// The tray panel tabs: the usage of every subscription and key, and the saved profiles.
+let panelTab = "usage";
+try { panelTab = localStorage.getItem("magpie.panelTab") || "usage"; } catch {}
 function setPanelTab(tab) {
   const tabs = $("#ptabs");
+  if (!tabs) return;
   // no usage to show, no tab for it
-  if (tabs.querySelector(`[data-ptab="${tab}"]`)?.hidden) tab = "agents";
+  if (tabs.querySelector(`[data-ptab="${tab}"]`)?.hidden) tab = "usage";
   panelTab = tab;
   try { localStorage.setItem("magpie.panelTab", tab); } catch {}
   document.body.dataset.ptab = tab;
@@ -4328,7 +3731,7 @@ function renderPanelQuota() {
     // the tabs part the row anew: the card goes where its tab is now
     if (!(none && panelTab === "usage")) slide($("#ptabs"), "ptabs");
   }
-  if (none && panelTab === "usage") setPanelTab("agents");
+  if (none && panelTab === "usage") setPanelTab("profiles");
   box.hidden = none;
   box.replaceChildren();
   if (none) { fit(); return; }
@@ -5751,16 +5154,15 @@ function show(v) {
   view = v;
   if (mode === "window") { for (const b of $("#nav").querySelectorAll("button")) b.classList.toggle("on", b.dataset.view === v); slide($("#nav"), "nav"); }
   $("#prefs").classList.toggle("on", v === "settings");
-  for (const id of ["agents", "providers", "gateway", "routing", "usage", "library", "settings"]) $("#view-" + id).hidden = v !== id;
+  for (const id of ["providers", "gateway", "usage", "settings"]) $("#view-" + id).hidden = v !== id;
   // back to where the reader was in it, and again once it has what it loads
   const back = () => backToReader($("#view-" + v));
   requestAnimationFrame(back);
   closePicker();
   if (v !== "providers" && editing !== null) cancelEdit();
-  if (v === "providers" || v === "gateway" || v === "routing") loadProviders().then(back, (e) => status(e.message, "err"));
+  if (v === "providers" || v === "gateway") loadProviders().then(back, (e) => status(e.message, "err"));
   if (v === "usage") loadUsage().then(back, (e) => status(e.message, "err"));
   if (v === "settings") loadSettings().then(back, (e) => status(e.message, "err"));
-  if (v === "library") window.loadLibrary?.()?.then(back);
   syncURL();
 }
 
@@ -5769,7 +5171,7 @@ function show(v) {
 function syncURL() {
   if (mode !== "window") return;
   const q = new URLSearchParams(location.search);
-  if (view === "agents") q.delete("view"); else q.set("view", view);
+  if (view === "providers") q.delete("view"); else q.set("view", view);
   if (view === "providers" && typeof editing === "string") q.set("edit", editing); else q.delete("edit");
   const s = q.size ? "?" + q : location.pathname;
   if (s !== location.search) history.replaceState(null, "", s);
@@ -5906,7 +5308,7 @@ setInterval(renderUpdateBadge, 15 * 60 * 1000); // a window left open still hear
   const OBS = { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["title"] };
   let masked = false;
   try { masked = localStorage.getItem("magpie.maskEmails") === "1"; } catch {}
-  const pages = [["#view-routing", "#rtMask"], ["#view-usage", "#usageMask"]].map(([v, b]) => {
+  const pages = [["#view-usage", "#usageMask"]].map(([v, b]) => {
     const view = $(v), btn = $(b);
     function mask() {
       const walk = document.createTreeWalker(view, NodeFilter.SHOW_TEXT), found = [];
@@ -5986,6 +5388,6 @@ if (mode === "window" && params.get("import")) {
   }).catch(() => {});
 }
 if (mode === "window" && params.get("view") === "providers" && params.get("edit")) editing = params.get("edit");
-if (mode === "window" && ["providers", "gateway", "routing", "usage", "library", "settings"].includes(params.get("view"))) show(params.get("view"));
+if (mode === "window" && ["providers", "gateway", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
 else if (mode === "window") slide($("#nav"), "nav");
 load();
