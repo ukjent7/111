@@ -203,7 +203,10 @@ async fn provider_scenario(
     .await;
     let listed = get_json(format!("{gateway}/api/providers")).await.unwrap();
 
-    let sent_body = r#"{"model":"alpha","messages":[{"role":"user","content":"hi"}]}"#;
+    // the spawn config's own provider comes first, so this one is picked by
+    // its model prefix; the prefix itself is cleaned out of the body
+    let sent_body = r#"{"model":"e2e/alpha","messages":[{"role":"user","content":"hi"}]}"#;
+    let sent_json: serde_json::Value = serde_json::from_str(sent_body).unwrap();
     client
         .post(format!("{gateway}/v1/chat/completions"))
         .header("authorization", "Bearer magpie")
@@ -361,12 +364,20 @@ async fn provider_scenario(
             .ok_or_else(|| format!("saved: {saved}, listed: {listed}")),
         ),
         check(
-            "requests route through the provider, with its key",
+            "the model prefix picks the provider, with its key and headers",
             (c.path == "/v1/chat/completions"
                 && c.headers.get("authorization").and_then(|v| v.to_str().ok())
                     == Some("Bearer sk-test-1234")
                 && c.headers.get("x-extra").and_then(|v| v.to_str().ok()) == Some("1")
-                && c.body == sent_body.as_bytes())
+                && serde_json::from_slice::<serde_json::Value>(&c.body)
+                    .ok()
+                    .is_some_and(|mut v| {
+                        let cleaned = v.as_object_mut().is_some_and(|m| {
+                            m.insert("model".into(), serde_json::json!("e2e/alpha"))
+                                == Some(serde_json::json!("alpha"))
+                        });
+                        cleaned && v == sent_json
+                    }))
             .then(|| {
                 format!(
                     "{} {} with the provider's key and headers",
