@@ -133,6 +133,7 @@ try {
       const page = await browser.newPage();
       page.on('pageerror', (e) => errors.push(`uncaught (cache): ${e.message}`));
       await page.goto(`http://127.0.0.1:${gw.port}/?shell=1`, { waitUntil: 'load' });
+      await page.click('#nav button:has-text("Providers")');
       await page.waitForTimeout(800);
       const tile = await page.textContent('#addSheet .tiles .grid .tile .n').catch(() => null);
       if (tile !== 'Acme') errors.push(`cached vendor tile is "${tile}", expected "Acme"`);
@@ -153,6 +154,7 @@ try {
       const page = await browser.newPage();
       page.on('pageerror', (e) => errors.push(`uncaught (cold): ${e.message}`));
       await page.goto(`http://127.0.0.1:${gw.port}/?shell=1`, { waitUntil: 'load' });
+      await page.click('#nav button:has-text("Providers")');
       await page.waitForTimeout(800);
       const bits = await page.$$eval('#addSheet .tiles .tile[disabled] .skeleton', (els) => els.length).catch(() => 0);
       if (bits < 8) errors.push(`expected skeleton tiles while the catalog loads, found ${bits} skeleton bits`);
