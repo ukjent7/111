@@ -1223,7 +1223,6 @@ body.window .foot { padding-left: 18px; }
 /* endpoints, each with its own test result */
 .eps { display: flex; flex-direction: column; gap: 3px; }
 .ep { display: flex; align-items: center; gap: 8px; height: 24px; min-width: 0; }
-.ep .pl { flex: none; width: 64px; font-size: 11.5px; color: var(--muted); }
 .ep code { color: var(--fg-2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; user-select: text; -webkit-user-select: text; cursor: text; }
 .res { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; border-radius: 5px; font-size: 11px; font-variant-numeric: tabular-nums; background: var(--pill); color: var(--muted); }
 .res:empty { display: none; }
@@ -1231,7 +1230,7 @@ body.window .foot { padding-left: 18px; }
 .res.ok { background: var(--green-soft); color: var(--green); }
 .res.bad { background: var(--red-soft); color: var(--red); max-width: 60%; }
 .res.bad span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.eps .text { align-self: flex-start; margin: 5px 0 0 72px; }
+.eps .text { align-self: flex-start; margin: 5px 0 0 0; }
 
 /* model chips: click to expose, click again to hide */
 .models { display: flex; flex-direction: column; gap: 6px; }

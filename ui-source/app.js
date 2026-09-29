@@ -2058,10 +2058,6 @@ function renderEditor(p, presetID) {
       ed.append(...field(t("Account"), acct, t("{agent}'s sign-in, read from its own files. Sign out there and this provider goes away.", { agent: a.agentName })));
     }
     ed.append(...field(t("Models"), renderModels(p), ""));
-    // a subscription's window too: Codex's backend says 272K for models
-    // that take 872K (#120)
-    const cx = input(draft.contexts || "", t("e.g. 128k · or gpt-6=1m, comma separated"));
-    ed.append(...field(t("Context window"), contextPicks(p, cx), t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
     ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
     if (p.chat || p.responses || p.anthropic) ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
     const bar = el("div", "bar");
@@ -2164,12 +2160,6 @@ function renderEditor(p, presetID) {
   }
 
   if (p) ed.append(...field(t("Models"), renderModels(p), ""));
-  {
-    // the window agents are told a model has, over what the vendor or
-    // models.dev says: one for all of them, and model=size for one
-    const cx = input(draft.contexts || "", t("e.g. 128k · or gpt-6=1m, comma separated"));
-    if (!decides) ed.append(...field(t("Context window"), contextPicks(p, cx), t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
-  }
   if (p && !decides) ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
   else if (custom) {
     const ex = input(draft.extra.join(", "), t("model ids, comma separated · e.g. gpt-5.5, claude-sonnet-5"));
@@ -2625,12 +2615,10 @@ function renderEndpoints(p, src) {
   const eps = el("div", "eps");
   const slots = {};
   const urls = src || {};
-  for (const [proto, label, hint] of PROTOS) {
+  for (const [proto] of PROTOS) {
     if (!urls[proto]) continue;
     const e = el("div", "ep");
-    const pl = el("span", "pl", label);
-    pl.title = t(hint);
-    e.append(pl, el("code", "", urls[proto]), slots[proto] = el("span", "res"));
+    e.append(el("code", "", urls[proto]), slots[proto] = el("span", "res"));
     eps.append(e);
   }
   if (p) {
