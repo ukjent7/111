@@ -18,7 +18,7 @@ const SAVE_EVERY: Duration = Duration::from_secs(5);
 /// bounded head+tail copy of each answer is all the parsing ever needs
 const KEEP: usize = 512 * 1024;
 /// history on disk: about a year, and never more records than a busy year
-const KEEP_DAYS: i64 = 366;
+const KEEP_DAYS: u64 = 366;
 const KEEP_RECORDS: usize = 100_000;
 
 /// one proxied call and the tokens its answer reported; `input` never

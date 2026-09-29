@@ -497,13 +497,13 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
                 Some(Err(e)) => {
                     if !done {
                         done = true;
-                        usage::record(&app, &model, status, &tee);
+                        usage::record(&app, &model, status.as_u16(), &tee);
                     }
                     Some((Err(e), (stream, tee, app, model, status, done)))
                 }
                 None => {
                     if !done {
-                        usage::record(&app, &model, status, &tee);
+                        usage::record(&app, &model, status.as_u16(), &tee);
                     }
                     None
                 }

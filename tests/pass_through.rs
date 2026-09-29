@@ -482,8 +482,10 @@ async fn usage_scenario(client: &reqwest::Client, mock_addr: &str) -> Vec<Check>
         .send()
         .await
         .unwrap()
-        .json()
+        .text()
         .await
+        .unwrap()
+        .parse()
         .unwrap();
     let stored = std::fs::read(config.with_file_name("usage.json"))
         .ok()
