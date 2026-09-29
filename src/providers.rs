@@ -958,12 +958,13 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
         })
         .unwrap_or_default();
     let models: Vec<String> = if per_model.is_empty() {
-        vec![p
-            .models
-            .iter()
-            .find(|m| m.on)
-            .map(|m| m.id.clone())
-            .unwrap_or_else(|| "test".to_owned())]
+        vec![
+            p.models
+                .iter()
+                .find(|m| m.on)
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| "test".to_owned()),
+        ]
     } else {
         per_model
     };
