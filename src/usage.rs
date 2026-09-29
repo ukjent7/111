@@ -74,7 +74,8 @@ impl Store {
         let cutoff = now_ms().saturating_sub(KEEP_DAYS * 86_400_000);
         records.retain(|r| r.time >= cutoff);
         if records.len() > KEEP_RECORDS {
-            records.drain(..records.len() - KEEP_RECORDS);
+            let excess = records.len() - KEEP_RECORDS;
+            records.drain(..excess);
         }
         let body = serde_json::to_string(&*records).unwrap_or_default();
         drop(records);
