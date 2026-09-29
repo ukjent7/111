@@ -491,21 +491,10 @@ async fn usage_scenario(client: &reqwest::Client, mock_addr: &str) -> Vec<Check>
         .unwrap()
         .parse()
         .unwrap();
-    // the log save is debounced; give the second call its turn to land
-    let mut stored: Option<serde_json::Value> = None;
-    for _ in 0..16 {
-        stored = std::fs::read(config.with_file_name("usage.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        if stored
-            .as_ref()
-            .and_then(|s| s.as_array())
-            .is_some_and(|a| a.len() == 2)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    // the log is written with the call, so both are on disk already
+    let stored = std::fs::read(config.with_file_name("usage.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
     drop(guard);
 
     let hit = u["hit_rate"].as_f64();

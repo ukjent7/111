@@ -7,13 +7,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// the disk rewrite happens at most this often; a quit may lose the rest
-const SAVE_EVERY: Duration = Duration::from_secs(5);
 /// usage lives in the first and last events of every known wire format, so a
 /// bounded head+tail copy of each answer is all the parsing ever needs
 const KEEP: usize = 512 * 1024;
@@ -44,7 +42,6 @@ pub struct Record {
 pub struct Store {
     records: Mutex<Vec<Record>>,
     path: PathBuf,
-    last_save: Mutex<Option<Instant>>,
 }
 
 impl Store {
@@ -56,20 +53,18 @@ impl Store {
         Store {
             records: Mutex::new(records),
             path,
-            last_save: Mutex::new(None),
         }
     }
 
+    /// every call lands on disk at once: a quit is a hard exit, so anything
+    /// still only in memory would be lost with it
     pub fn push(&self, record: Record) {
         self.records.lock().unwrap().push(record);
-        let last = *self.last_save.lock().unwrap();
-        if last.is_none_or(|at| at.elapsed() >= SAVE_EVERY) {
-            self.save();
-        }
+        self.save();
     }
 
     /// the log out of line and renamed, so a crash mid-write can't truncate it
-    pub fn save(&self) {
+    fn save(&self) {
         let mut records = self.records.lock().unwrap();
         let cutoff = now_ms().saturating_sub(KEEP_DAYS * 86_400_000);
         records.retain(|r| r.time >= cutoff);
@@ -86,7 +81,6 @@ impl Store {
         if std::fs::write(&tmp, body).is_ok() {
             let _ = std::fs::rename(&tmp, &self.path);
         }
-        *self.last_save.lock().unwrap() = Some(Instant::now());
     }
 
     /// The Usage tab's answer: totals over the window, the per-bucket series
