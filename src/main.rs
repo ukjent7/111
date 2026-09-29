@@ -538,7 +538,10 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
         }
     };
 
-    let mut sent = app.client().request(parts.method, &to).headers(parts.headers);
+    let mut sent = app
+        .client()
+        .request(parts.method, &to)
+        .headers(parts.headers);
     if !forwarded_body.is_empty() {
         sent = sent.body(forwarded_body);
     }

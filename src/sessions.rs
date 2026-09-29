@@ -505,9 +505,7 @@ pub async fn terminal(State(app): State<Arc<App>>, Json(body): Json<Value>) -> R
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
-                cmd.raw_arg(format!(
-                    "start \"magpie\" /D \"{cwd}\" cmd /K {resume}"
-                ));
+                cmd.raw_arg(format!("start \"magpie\" /D \"{cwd}\" cmd /K {resume}"));
             }
             #[cfg(not(windows))]
             {

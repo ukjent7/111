@@ -1131,7 +1131,10 @@ async fn tiny_request(
         Api::Anthropic => format!("{}/v1/messages", base.trim_end_matches('/')),
         Api::Chat => format!("{}/chat/completions", base.trim_end_matches('/')),
         Api::Responses => format!("{}/responses", base.trim_end_matches('/')),
-        Api::Gemini => format!("{}/models/{model}:generateContent", base.trim_end_matches('/')),
+        Api::Gemini => format!(
+            "{}/models/{model}:generateContent",
+            base.trim_end_matches('/')
+        ),
     };
     let body = match proto {
         Api::Anthropic | Api::Chat => {
