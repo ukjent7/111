@@ -96,7 +96,12 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
             }
         }
         // the proxy takes effect at once, not at the next launch
-        app.apply_proxy(cfg.settings.get("proxy").and_then(Value::as_str).unwrap_or(""));
+        app.apply_proxy(
+            cfg.settings
+                .get("proxy")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
         let _ = persist(&app.config_path, &cfg);
     }
     Json(get_settings(&app, &cfg)).into_response()

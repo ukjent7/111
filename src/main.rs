@@ -103,9 +103,7 @@ fn build_client(proxy: &str) -> reqwest::Client {
         }
         _ => {}
     }
-    builder
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
 fn main() -> Result<()> {
@@ -511,10 +509,9 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
                     providers::Auth::Google => ("x-goog-api-key", t.key.clone()),
                     providers::Auth::Bearer => ("authorization", format!("Bearer {}", t.key)),
                 };
-                if let (Ok(name), Ok(value)) = (
-                    HeaderName::from_static(name),
-                    HeaderValue::from_str(&value),
-                ) {
+                if let (Ok(name), Ok(value)) =
+                    (HeaderName::from_static(name), HeaderValue::from_str(&value))
+                {
                     parts.headers.insert(name, value);
                 }
             }

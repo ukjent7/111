@@ -96,10 +96,7 @@ fn newer(latest: &str, current: &str) -> bool {
 }
 
 /// ask the releases API what the newest magpie is
-async fn ask(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<(String, String, String), String> {
+async fn ask(client: &reqwest::Client, url: &str) -> Result<(String, String, String), String> {
     let res = client
         .get(url)
         .header(header::USER_AGENT, "magpie-gateway")

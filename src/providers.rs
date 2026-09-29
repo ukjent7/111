@@ -187,7 +187,9 @@ fn image_ext(bytes: &[u8]) -> Option<&'static str> {
         [0x89, b'P', b'N', b'G', ..] => Some("png"),
         [0xFF, 0xD8, ..] => Some("jpg"),
         [b'G', b'I', b'F', b'8', ..] => Some("gif"),
-        [b'R', b'I', b'F', b'F', ..] if bytes.len() > 12 && &bytes[8..12] == b"WEBP" => Some("webp"),
+        [b'R', b'I', b'F', b'F', ..] if bytes.len() > 12 && &bytes[8..12] == b"WEBP" => {
+            Some("webp")
+        }
         [0x00, 0x00, 0x01, 0x00, ..] => Some("ico"),
         _ if bytes.starts_with(b"<svg")
             || bytes.starts_with(b"<?xml")
@@ -227,7 +229,10 @@ pub async fn upload_icon(State(app): State<Arc<App>>, Json(body): Json<Value>) -
         return err(StatusCode::BAD_REQUEST, "that is not base64");
     };
     let Some(ext) = image_ext(&bytes) else {
-        return err(StatusCode::BAD_REQUEST, "that is not a picture magpie can show");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "that is not a picture magpie can show",
+        );
     };
     let id = icon_id();
     store_logo(&app.logos_dir, &id, ext, &bytes);
@@ -245,8 +250,7 @@ pub async fn favicon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Re
         &format!("https://{url}")
     })
     .ok()
-    .and_then(|u| u.host_str().map(str::to_owned))
-    else {
+    .and_then(|u| u.host_str().map(str::to_owned)) else {
         return err(StatusCode::BAD_REQUEST, "that is not a URL");
     };
     // Google's favicon service has almost every site; the site's own
@@ -257,7 +261,11 @@ pub async fn favicon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Re
     ];
     let client = app.client();
     for url in urls {
-        if let Ok(res) = client.get(&url).timeout(Duration::from_secs(5)).send().await
+        if let Ok(res) = client
+            .get(&url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
             && res.status().is_success()
             && let Ok(bytes) = res.bytes().await
             && !bytes.is_empty()
@@ -1212,7 +1220,10 @@ pub fn route_for(
     let (api, sub) = if path.starts_with("/v1/messages") || path.starts_with("/v1/complete") {
         (Api::Anthropic, path.to_owned())
     } else if gemini_path {
-        (Api::Gemini, path.strip_prefix("/v1beta").unwrap_or(path).to_owned())
+        (
+            Api::Gemini,
+            path.strip_prefix("/v1beta").unwrap_or(path).to_owned(),
+        )
     } else if path.contains("/responses") {
         (Api::Responses, after_v1(path).to_owned())
     } else {

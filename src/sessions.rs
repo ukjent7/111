@@ -337,19 +337,21 @@ fn day_of(ms: u64) -> String {
 }
 
 fn day_ms(day: &str, end: bool) -> u64 {
-    day.parse::<jiff::civil::Date>().ok().map(|d| {
-        let z = d
-            .to_zoned(jiff::tz::TimeZone::system())
-            .unwrap_or_else(|_| jiff::Zoned::now());
-        if end {
-            z + jiff::Span::new().days(1)
-        } else {
-            z
-        }
-        .timestamp()
-        .as_millisecond() as u64
-    })
-    .unwrap_or(0)
+    day.parse::<jiff::civil::Date>()
+        .ok()
+        .map(|d| {
+            let z = d
+                .to_zoned(jiff::tz::TimeZone::system())
+                .unwrap_or_else(|_| jiff::Zoned::now());
+            if end {
+                z + jiff::Span::new().days(1)
+            } else {
+                z
+            }
+            .timestamp()
+            .as_millisecond() as u64
+        })
+        .unwrap_or(0)
 }
 
 pub async fn list(State(app): State<Arc<App>>) -> Response {
@@ -379,12 +381,19 @@ pub async fn stats(
     State(app): State<Arc<App>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let days: i64 = params.get("days").and_then(|d| d.parse().ok()).unwrap_or(30);
+    let days: i64 = params
+        .get("days")
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(30);
     let sessions = read(&app);
     let catalog = app.catalog.lock().unwrap();
 
     let today = jiff::Zoned::now().date().to_string();
-    let earliest = sessions.iter().map(|s| day_of(s.start)).min().unwrap_or_else(|| today.clone());
+    let earliest = sessions
+        .iter()
+        .map(|s| day_of(s.start))
+        .min()
+        .unwrap_or_else(|| today.clone());
     let first = if days > 0 {
         jiff::Zoned::now()
             .checked_sub(jiff::Span::new().days(days - 1))
@@ -407,7 +416,12 @@ pub async fn stats(
         for (model, t) in &s.tokens {
             let price = usage::price_of(&catalog, model);
             let e = usage_by_day
-                .entry((date.clone(), s.agent.to_owned(), model.clone(), s.cwd.clone()))
+                .entry((
+                    date.clone(),
+                    s.agent.to_owned(),
+                    model.clone(),
+                    s.cwd.clone(),
+                ))
                 .or_default();
             e[0] += t[0] as f64;
             e[1] += t[1] as f64;
@@ -445,9 +459,7 @@ pub async fn stats(
         let active: Vec<Value> = active_by_day
             .iter()
             .filter(|((d, ..), _)| *d == date)
-            .map(|((_, agent, cwd), secs)| {
-                json!({ "agent": agent, "cwd": cwd, "seconds": secs })
-            })
+            .map(|((_, agent, cwd), secs)| json!({ "agent": agent, "cwd": cwd, "seconds": secs }))
             .collect();
         out.push(json!({ "date": date, "usage": usage, "active": active }));
         let next = day_ms(&cursor, true);
@@ -493,8 +505,9 @@ pub async fn terminal(State(app): State<Arc<App>>, Json(body): Json<Value>) -> R
             cmd.spawn().is_ok()
         }
         "macos" => {
-            let script =
-                format!("tell application \"Terminal\" to do script \"cd \\\"{cwd}\\\" && {resume}\"");
+            let script = format!(
+                "tell application \"Terminal\" to do script \"cd \\\"{cwd}\\\" && {resume}\""
+            );
             let mut cmd = std::process::Command::new("osascript");
             cmd.arg("-e").arg(script);
             cmd.spawn().is_ok()

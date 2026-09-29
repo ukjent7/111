@@ -165,9 +165,7 @@ impl Store {
                 hit_prompt += r.input + r.cache_read + r.cache_write;
             }
             if !r.model.is_empty() {
-                let icon = price
-                    .as_ref()
-                    .map(|(_, vendor)| format!("file:{vendor}"));
+                let icon = price.as_ref().map(|(_, vendor)| format!("file:{vendor}"));
                 let m = models.entry(r.model.clone()).or_default();
                 *m = (
                     m.0 + 1,
@@ -175,9 +173,9 @@ impl Store {
                     m.2 + r.input,
                     m.3 + r.output,
                     m.4 + r.cache_read,
-                    m.5 + price
-                        .as_ref()
-                        .map_or(0.0, |(p, _)| p.at(r.input, r.output, r.cache_read, r.cache_write)),
+                    m.5 + price.as_ref().map_or(0.0, |(p, _)| {
+                        p.at(r.input, r.output, r.cache_read, r.cache_write)
+                    }),
                     icon.unwrap_or_else(|| m.6.clone()),
                 );
             }
@@ -187,9 +185,9 @@ impl Store {
                     b.0 + 1,
                     b.1 + r.input,
                     b.2 + r.output,
-                    b.3 + price
-                        .as_ref()
-                        .map_or(0.0, |(p, _)| p.at(r.input, r.output, r.cache_read, r.cache_write)),
+                    b.3 + price.as_ref().map_or(0.0, |(p, _)| {
+                        p.at(r.input, r.output, r.cache_read, r.cache_write)
+                    }),
                     b.4 || price.is_none(),
                 );
             }

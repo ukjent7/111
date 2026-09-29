@@ -922,7 +922,8 @@ fn release_json(host: &str) -> Vec<u8> {
 /// test can restart into it and talk to it again
 fn asset_bytes() -> Vec<u8> {
     static ASSET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    ASSET.get_or_init(|| std::fs::read(env!("CARGO_BIN_EXE_magpie-gateway")).unwrap())
+    ASSET
+        .get_or_init(|| std::fs::read(env!("CARGO_BIN_EXE_magpie-gateway")).unwrap())
         .clone()
 }
 
@@ -1053,7 +1054,12 @@ async fn gemini_scenario(
                     .and_then(|v| v.to_str().ok())
                     == Some("gm-key")
                 && !by_header.headers.contains_key("authorization"))
-            .then(|| format!("{} {} with x-goog-api-key", by_header.method, by_header.path))
+            .then(|| {
+                format!(
+                    "{} {} with x-goog-api-key",
+                    by_header.method, by_header.path
+                )
+            })
             .ok_or_else(|| format!("captured {by_header:#?}")),
         ),
         check(
@@ -1073,11 +1079,7 @@ async fn gemini_scenario(
 
 /// The editor's quiet endpoints: a model's display name and reasoning levels
 /// are saved apart from Save, and a fetched vendor list can be dropped again.
-async fn editor_scenario(
-    client: &reqwest::Client,
-    gateway: &str,
-    mock_addr: &str,
-) -> Vec<Check> {
+async fn editor_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str) -> Vec<Check> {
     let save = serde_json::json!({
         "id": "ed", "new": true, "name": "Editor Vendor",
         "chat": format!("http://{mock_addr}/v1"), "key": "sk-ed", "models": ["alpha"],
@@ -1094,7 +1096,10 @@ async fn editor_scenario(
         client
             .post(format!("{gateway}/api/provider/name"))
             .header("content-type", "application/json")
-            .body(serde_json::json!({"id": "ed", "model": "alpha", "modelName": "Fancy Alpha"}).to_string())
+            .body(
+                serde_json::json!({"id": "ed", "model": "alpha", "modelName": "Fancy Alpha"})
+                    .to_string(),
+            )
             .send()
             .await
             .unwrap(),
@@ -1104,7 +1109,10 @@ async fn editor_scenario(
         client
             .post(format!("{gateway}/api/provider/efforts"))
             .header("content-type", "application/json")
-            .body(serde_json::json!({"id": "ed", "model": "alpha", "efforts": ["low", "high"]}).to_string())
+            .body(
+                serde_json::json!({"id": "ed", "model": "alpha", "efforts": ["low", "high"]})
+                    .to_string(),
+            )
             .send()
             .await
             .unwrap(),
@@ -1156,7 +1164,11 @@ async fn editor_scenario(
     let (named_m, kept_m, fetched_p) = (
         model(&named),
         model(&efforted),
-        listed["providers"].as_array().and_then(|p| p.first()).cloned().unwrap_or_default(),
+        listed["providers"]
+            .as_array()
+            .and_then(|p| p.first())
+            .cloned()
+            .unwrap_or_default(),
     );
     vec![
         check(
@@ -1191,11 +1203,7 @@ async fn editor_scenario(
 
 /// A custom provider's own picture: uploaded, fetched from the site, or from
 /// a link — each served back from /api/icons.
-async fn icons_scenario(
-    client: &reqwest::Client,
-    gateway: &str,
-    mock_addr: &str,
-) -> Vec<Check> {
+async fn icons_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str) -> Vec<Check> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(PNG_BYTES);
     let uploaded = get_json_raw(
         client
@@ -1221,7 +1229,10 @@ async fn icons_scenario(
         client
             .post(format!("{gateway}/api/import/icon"))
             .header("content-type", "application/json")
-            .body(serde_json::json!({ "url": format!("http://{mock_addr}/import-icon.png") }).to_string())
+            .body(
+                serde_json::json!({ "url": format!("http://{mock_addr}/import-icon.png") })
+                    .to_string(),
+            )
             .send()
             .await
             .unwrap(),
@@ -1247,9 +1258,13 @@ async fn icons_scenario(
             &format!("{what} becomes an icon the page can show"),
             (icon.starts_with("file:")
                 && served.status().is_success()
-                && served.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) == Some("image/png"))
-                .then(|| format!("{icon} served as image/png"))
-                .ok_or_else(|| format!("icon {icon:?}, status {}", served.status())),
+                && served
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    == Some("image/png"))
+            .then(|| format!("{icon} served as image/png"))
+            .ok_or_else(|| format!("icon {icon:?}, status {}", served.status())),
         ));
     }
     checks
@@ -1334,8 +1349,7 @@ async fn import_scenario(
         check(
             "the imported provider routes with the real key",
             (c.path == "/anthropic/v1/messages"
-                && c.headers.get("x-api-key").and_then(|v| v.to_str().ok())
-                    == Some("sk-cc-1234"))
+                && c.headers.get("x-api-key").and_then(|v| v.to_str().ok()) == Some("sk-cc-1234"))
             .then(|| format!("{} {} with the imported key", c.method, c.path))
             .ok_or_else(|| format!("captured {c:#?}")),
         ),
@@ -1366,34 +1380,48 @@ async fn sessions_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check
     let claude = sessions.iter().find(|s| s["agent"] == "claude");
     let codex = sessions.iter().find(|s| s["agent"] == "codex");
     let days = stats["days"].as_array().cloned().unwrap_or_default();
-    let day_rows: Vec<&serde_json::Value> = days.iter().flat_map(|d| d["usage"].as_array().unwrap()).collect();
+    let day_rows: Vec<&serde_json::Value> = days
+        .iter()
+        .flat_map(|d| d["usage"].as_array().unwrap())
+        .collect();
     vec![
         check(
             "Claude Code's and Codex's sessions show up",
-            (claude.map(|s| s["id"].as_str() == Some("abc")).unwrap_or(false)
-                && codex.map(|s| s["id"].as_str() == Some("sess-def")).unwrap_or(false))
+            (claude
+                .map(|s| s["id"].as_str() == Some("abc"))
+                .unwrap_or(false)
+                && codex
+                    .map(|s| s["id"].as_str() == Some("sess-def"))
+                    .unwrap_or(false))
             .then(|| "both agents' sessions listed".into())
             .ok_or_else(|| format!("sessions: {list}")),
         ),
         check(
             "a session's tokens come from its own file",
-            (claude.map(|s| {
-                s["input"] == serde_json::json!(100)
-                    && s["output"] == serde_json::json!(50)
-                    && s["cache_read"] == serde_json::json!(30)
-                    && s["cache_write"] == serde_json::json!(5)
-            })
-            .unwrap_or(false)
+            (claude
+                .map(|s| {
+                    s["input"] == serde_json::json!(100)
+                        && s["output"] == serde_json::json!(50)
+                        && s["cache_read"] == serde_json::json!(30)
+                        && s["cache_write"] == serde_json::json!(5)
+                })
+                .unwrap_or(false)
                 && codex
-                    .map(|s| s["input"] == serde_json::json!(200) && s["output"] == serde_json::json!(20))
+                    .map(|s| {
+                        s["input"] == serde_json::json!(200) && s["output"] == serde_json::json!(20)
+                    })
                     .unwrap_or(false))
             .then(|| "claude 100/50 (+30/+5), codex 200/20".into())
             .ok_or_else(|| format!("sessions: {list}")),
         ),
         check(
             "a session carries the command that resumes it",
-            (claude.map(|s| s["resume"].as_str() == Some("claude --resume abc")).unwrap_or(false)
-                && codex.map(|s| s["resume"].as_str() == Some("codex resume sess-def")).unwrap_or(false))
+            (claude
+                .map(|s| s["resume"].as_str() == Some("claude --resume abc"))
+                .unwrap_or(false)
+                && codex
+                    .map(|s| s["resume"].as_str() == Some("codex resume sess-def"))
+                    .unwrap_or(false))
             .then(|| "resume commands along".into())
             .ok_or_else(|| format!("sessions: {list}")),
         ),
@@ -1406,8 +1434,8 @@ async fn sessions_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check
                     .filter(|r| r["agent"] == "claude" || r["agent"] == "codex")
                     .count()
                     >= 2)
-            .then(|| format!("{} day buckets, both agents present", days.len()))
-            .ok_or_else(|| format!("stats: {stats}")),
+                .then(|| format!("{} day buckets, both agents present", days.len()))
+                .ok_or_else(|| format!("stats: {stats}")),
         ),
     ]
 }
@@ -1451,10 +1479,9 @@ async fn wiring_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> 
         ),
         check(
             "the window actions answer politely",
-            (window.status() == StatusCode::NO_CONTENT
-                && tint_body.contains("\"ok\""))
-            .then(|| "window actions are wired".into())
-            .ok_or_else(|| format!("window {}, tint {tint_body}", window.status())),
+            (window.status() == StatusCode::NO_CONTENT && tint_body.contains("\"ok\""))
+                .then(|| "window actions are wired".into())
+                .ok_or_else(|| format!("window {}, tint {tint_body}", window.status())),
         ),
         check(
             "the update state names this build",
@@ -1528,10 +1555,9 @@ async fn update_scenario(client: &reqwest::Client, gateway: &str, config: &Path)
         ),
         check(
             "the release's binary downloads",
-            (ready["state"] == "ready"
-                && ready["total"].as_u64().unwrap_or(0) > 0)
-            .then(|| format!("{} bytes staged", ready["total"]))
-            .ok_or_else(|| format!("download: {ready}")),
+            (ready["state"] == "ready" && ready["total"].as_u64().unwrap_or(0) > 0)
+                .then(|| format!("{} bytes staged", ready["total"]))
+                .ok_or_else(|| format!("download: {ready}")),
         ),
         check(
             "the swap restarts into the new binary, which serves again",

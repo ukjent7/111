@@ -123,11 +123,17 @@ fn extract(e: &Value, r: &str) -> (String, String, String, String) {
         .or_else(|| find_str(e, "base_url"))
         .unwrap_or_default()
         .to_owned();
-    let key = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "apiKey", "api_key"]
-        .iter()
-        .find_map(|k| find_str(e, k))
-        .unwrap_or_default()
-        .to_owned();
+    let key = [
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "apiKey",
+        "api_key",
+    ]
+    .iter()
+    .find_map(|k| find_str(e, k))
+    .unwrap_or_default()
+    .to_owned();
     (name, anthropic, chat, key)
 }
 
@@ -171,7 +177,11 @@ fn items(config: &Value, existing: &[providers::Provider]) -> Vec<Value> {
             if anthropic.is_empty() && chat.is_empty() && key.is_empty() {
                 return None;
             }
-            let host = host_of(if anthropic.is_empty() { &chat } else { &anthropic });
+            let host = host_of(if anthropic.is_empty() {
+                &chat
+            } else {
+                &anthropic
+            });
             let same = existing.iter().find(|p| {
                 !host.is_empty()
                     && host_of(p.base_url()) == host
