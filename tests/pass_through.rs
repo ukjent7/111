@@ -502,13 +502,13 @@ async fn usage_scenario(client: &reqwest::Client, mock_addr: &str) -> Vec<Check>
                 && u["cache_write"] == serde_json::json!(200)
                 && u["reasoning"] == serde_json::json!(60)
                 && u["errors"] == serde_json::json!(0))
-                .then(|| {
-                    format!(
-                        "{} calls, {} in, {} out, cached {}/{}",
-                        u["calls"], u["input"], u["output"], u["cache_read"], u["cache_write"]
-                    )
-                })
-                .ok_or_else(|| format!("usage: {u}")),
+            .then(|| {
+                format!(
+                    "{} calls, {} in, {} out, cached {}/{}",
+                    u["calls"], u["input"], u["output"], u["cache_read"], u["cache_write"]
+                )
+            })
+            .ok_or_else(|| format!("usage: {u}")),
         ),
         check(
             "the cache hit rate is cache read over the whole reported prompt",
@@ -541,10 +541,12 @@ async fn usage_scenario(client: &reqwest::Client, mock_addr: &str) -> Vec<Check>
                 .and_then(|s| s.as_array())
                 .is_some_and(|a| a.len() == 2)
                 .then(|| "usage.json holds both calls".to_owned())
-                .ok_or_else(|| format!(
-                    "usage.json missing or wrong at {}",
-                    config.with_file_name("usage.json").display()
-                )),
+                .ok_or_else(|| {
+                    format!(
+                        "usage.json missing or wrong at {}",
+                        config.with_file_name("usage.json").display()
+                    )
+                }),
         ),
     ]
 }

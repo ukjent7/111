@@ -477,12 +477,22 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     let usage_app = app.clone();
     let usage_model = recorded_model.to_owned();
     let body = Body::from_stream(futures::stream::unfold(
-        (upstream_res.bytes_stream(), tee, usage_app, usage_model, status, false),
+        (
+            upstream_res.bytes_stream(),
+            tee,
+            usage_app,
+            usage_model,
+            status,
+            false,
+        ),
         |(mut stream, tee, app, model, status, mut done)| async move {
             match stream.next().await {
                 Some(Ok(chunk)) => {
                     tee.lock().unwrap().push(&chunk);
-                    Some((Ok::<_, reqwest::Error>(chunk), (stream, tee, app, model, status, done)))
+                    Some((
+                        Ok::<_, reqwest::Error>(chunk),
+                        (stream, tee, app, model, status, done),
+                    ))
                 }
                 Some(Err(e)) => {
                     if !done {

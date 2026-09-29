@@ -117,7 +117,10 @@ impl Store {
                 if let Some(first) = records.iter().map(|r| r.time).min()
                     && let Some(oldest) = zoned(first)
                 {
-                    let (y0, m0) = (i64::from(oldest.date().year()), i64::from(oldest.date().month()));
+                    let (y0, m0) = (
+                        i64::from(oldest.date().year()),
+                        i64::from(oldest.date().month()),
+                    );
                     let (y1, m1) = (i64::from(now.date().year()), i64::from(now.date().month()));
                     let months = (y1 - y0) * 12 + (m1 - m0);
                     labels.extend((0..=months).filter_map(|k| {
@@ -156,15 +159,21 @@ impl Store {
             }
             if !r.model.is_empty() {
                 let m = models.entry(r.model.clone()).or_default();
-                *m = (m.0 + 1, m.1 + u64::from(r.status >= 400), m.2 + r.input, m.3 + r.output, m.4 + r.cache_read);
+                *m = (
+                    m.0 + 1,
+                    m.1 + u64::from(r.status >= 400),
+                    m.2 + r.input,
+                    m.3 + r.output,
+                    m.4 + r.cache_read,
+                );
             }
             if let Some(slot) = index.get(label(r.time, bucket).as_str()) {
                 let b = &mut series[*slot];
                 *b = (b.0 + 1, b.1 + r.input, b.2 + r.output);
             }
         }
-        let hit_rate = (hit_prompt > 0)
-            .then(|| (1000.0 * hit_read as f64 / hit_prompt as f64).round() / 10.0);
+        let hit_rate =
+            (hit_prompt > 0).then(|| (1000.0 * hit_read as f64 / hit_prompt as f64).round() / 10.0);
 
         let mut rows: Vec<Value> = models
             .into_iter()
@@ -173,7 +182,11 @@ impl Store {
             })
             .collect();
         rows.sort_by(|a, b| {
-            let t = |v: &Value| v["input"].as_u64().unwrap_or(0) + v["output"].as_u64().unwrap_or(0) + v["cache_read"].as_u64().unwrap_or(0);
+            let t = |v: &Value| {
+                v["input"].as_u64().unwrap_or(0)
+                    + v["output"].as_u64().unwrap_or(0)
+                    + v["cache_read"].as_u64().unwrap_or(0)
+            };
             t(b).cmp(&t(a))
         });
 
@@ -225,7 +238,10 @@ fn label(ms: u64, bucket: &str) -> String {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
 /// the bytes of a streamed answer: head and tail kept, the middle dropped when
@@ -324,7 +340,10 @@ fn merge(acc: &mut Tokens, t: Tokens) {
 /// wire formats use: a chat answer's `usage`, Anthropic's `message.usage`, the
 /// Responses API's `response.usage`, Gemini's `usageMetadata`
 fn harvest(v: &Value, out: &mut Vec<Tokens>) {
-    for holder in [Some(v), v.get("message"), v.get("response")].into_iter().flatten() {
+    for holder in [Some(v), v.get("message"), v.get("response")]
+        .into_iter()
+        .flatten()
+    {
         if let Some(u) = holder.get("usage").filter(|u| u.is_object()) {
             out.push(normalize(u));
         }
