@@ -38,7 +38,7 @@ jobs:
       # pull requests
       - name: cargo fmt --check
         if: github.event_name == 'pull_request'
-        run: cargo fmt --check --locked
+        run: cargo fmt --check
       - name: cargo clippy
         run: cargo clippy --all-targets --locked
 
