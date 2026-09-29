@@ -1479,6 +1479,24 @@ async function loadProviders() {
     } else renderGatewayView();
     backToReader($("#view-gateway"));
   } else renderProviders();
+  pollCatalog();
+}
+
+// The vendor catalog trails the list itself: models.dev is fetched in the
+// background (from the disk cache's last refresh on every launch but the
+// first). Until it lands the add sheet keeps skeleton tiles, and this asks
+// again — the call is local — redrawing only when it has arrived, so a
+// reload never interrupts the reader for nothing.
+let catalogPoll = 0;
+function pollCatalog() {
+  clearTimeout(catalogPoll);
+  if (view !== "providers" || providers.catalogReady) return;
+  catalogPoll = setTimeout(async () => {
+    if (view !== "providers" || providers.catalogReady) return;
+    providers = await api("providers");
+    if (providers.catalogReady) renderProviders();
+    else pollCatalog();
+  }, 2000);
 }
 
 // Rows in the shape of the list while it is first asked for; a reload keeps
@@ -2129,6 +2147,22 @@ function renderAdd() {
         tt.append(el("span", "n", x.agentName), el("span", "s", t("Add it back")));
         b.append(tt);
         b.onclick = () => providerAction("show", { id: x.provider }, t("{name} added back", { name: x.agentName }));
+        grid.append(b);
+      }
+      tiles.append(grid);
+    }
+    // the catalog rides in later than the list; until it does the vendor
+    // tiles are on their way, not missing
+    if (!providers.catalogReady) {
+      any = true;
+      tiles.append(el("div", "kind", t("Vendors")));
+      const grid = el("div", "grid");
+      for (let i = 0; i < 4; i++) {
+        const b = el("button", "tile");
+        b.disabled = true;
+        const tt = el("span", "tt");
+        tt.append(el("span", "skeleton pv-tile-n"), el("span", "skeleton pv-tile-s"));
+        b.append(el("span", "skeleton pv-tile-icon"), tt);
         grid.append(b);
       }
       tiles.append(grid);

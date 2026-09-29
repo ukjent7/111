@@ -1100,6 +1100,11 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .tile.added:hover { opacity: .8; }
 .tile .check { margin-left: auto; color: var(--green); display: inline-flex; flex: none; }
 .tile.custom { border-style: dashed; }
+/* the vendor tiles while the catalog is still on its way */
+.tile[disabled] { pointer-events: none; opacity: .7; }
+.tile .pv-tile-icon { width: 20px; height: 20px; border-radius: 6px; flex: none; }
+.tile .pv-tile-n { width: 92px; height: 10px; }
+.tile .pv-tile-s { width: 128px; height: 8px; }
 /* the provider editor, in a dialog */
 .editor { padding: 16px 18px 14px; display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px 14px; align-items: start; }
 .editor .ehead { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding-bottom: 8px; margin-bottom: 2px; border-bottom: 1px solid var(--line-2); }

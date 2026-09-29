@@ -27,7 +27,7 @@ pub async fn list(State(app): State<Arc<App>>) -> Response {
 pub async fn sync(State(app): State<Arc<App>>) -> Response {
     match fetch_catalog(&app.client).await {
         Ok(v) => {
-            *app.catalog.lock().unwrap() = v;
+            store_catalog(&app, v);
             shell_state()
         }
         Err(e) => err(
@@ -35,6 +35,18 @@ pub async fn sync(State(app): State<Arc<App>>) -> Response {
             &format!("models.dev didn't answer: {e}"),
         ),
     }
+}
+
+/// A fetched catalog replaces the one in memory and the disk cache together;
+/// a failed cache write only costs the next launch a cold fetch.
+pub fn store_catalog(app: &App, v: Value) {
+    if let Some(dir) = app.catalog_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(body) = serde_json::to_vec(&v) {
+        let _ = std::fs::write(&app.catalog_path, body);
+    }
+    *app.catalog.lock().unwrap() = v;
 }
 
 pub async fn fetch_catalog(client: &reqwest::Client) -> anyhow::Result<Value> {
@@ -105,6 +117,9 @@ pub fn payload(app: &App, cfg: &ConfigState) -> Value {
     json!({
         "providers": providers,
         "presets": presets(&catalog),
+        // the catalog is fetched in the background; while it is still on its
+        // way the presets are not "there are no vendors" but "not loaded yet"
+        "catalogReady": !catalog.is_null(),
         "excluded": [],
         "gateway": {
             "running": true,

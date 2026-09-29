@@ -50,8 +50,11 @@ pub struct App {
     pub client: reqwest::Client,
     pub config: tokio::sync::Mutex<ConfigState>,
     pub config_path: PathBuf,
-    /// models.dev's vendor catalog, fetched at startup and on Sync
+    /// models.dev's vendor catalog, loaded from the disk cache at startup and
+    /// refreshed from the network in the background and on Sync
     pub catalog: Mutex<Value>,
+    /// the catalog's disk cache, next to the config
+    pub catalog_path: PathBuf,
     /// vendor logos from models.dev, by id; a miss is remembered too
     pub logos: Mutex<HashMap<String, Logo>>,
     pub gateway: Gateway,
@@ -120,11 +123,13 @@ fn main() -> Result<()> {
     } else {
         format!(", raw upstream {}", cfg.upstream)
     };
+    let catalog_path = config_path.with_file_name("catalog.json");
     let app = Arc::new(App {
         client,
         config: tokio::sync::Mutex::new(cfg),
         config_path,
-        catalog: Mutex::new(Value::default()),
+        catalog: Mutex::new(load_catalog(&catalog_path)),
+        catalog_path,
         logos: Mutex::new(HashMap::new()),
         gateway: Gateway {
             url: format!("http://{listen}"),
@@ -159,15 +164,24 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     {
-        // models.dev in the background: the Providers tab wants its vendor list
+        // models.dev in the background: the Providers tab wants its vendor
+        // list. From the second launch the disk cache has it before the
+        // window even opens; this refresh is for the first launch and for a
+        // cache gone stale, so a miss just tries again in a minute.
         let app = app.clone();
         runtime.spawn(async move {
-            match providers::fetch_catalog(&app.client).await {
-                Ok(v) => {
-                    *app.catalog.lock().unwrap() = v;
-                    tracing::info!("models.dev catalog loaded");
+            loop {
+                match providers::fetch_catalog(&app.client).await {
+                    Ok(v) => {
+                        providers::store_catalog(&app, v);
+                        tracing::info!("models.dev catalog loaded");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("models.dev not fetched yet, retrying in a minute (Sync retries too): {e}");
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
                 }
-                Err(e) => tracing::warn!("models.dev not fetched yet (Sync retries): {e}"),
             }
         });
     }
@@ -481,6 +495,15 @@ fn config_path(flag: Option<&str>) -> Result<PathBuf> {
 fn load_config(path: &Path) -> ConfigState {
     // a hand-edited or half-written file falls back to a fresh config, same
     // as a missing one
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// The catalog from the last successful refresh, so a launch is never a cold
+/// one; a missing or corrupt cache costs the background fetch its usual job.
+fn load_catalog(path: &Path) -> Value {
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
