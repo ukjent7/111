@@ -669,6 +669,7 @@ const I18N = {
     "{a} in · {b} out": "输入 {a} · 输出 {b}",
     "cache read": "缓存读取",
     "hit rate {p}": "命中率 {p}",
+    "cache hit rate": "缓存命中率",
     "{n} written": "写入 {n}",
     "reasoning": "推理",
     "agent": "Agent",

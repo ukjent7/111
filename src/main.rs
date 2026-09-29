@@ -15,6 +15,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::StreamExt;
 use include_dir::{Dir, include_dir};
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,7 @@ use tracing_subscriber::EnvFilter;
 
 mod providers;
 mod settings;
+mod usage;
 
 // the prepared UI, embedded so the binary alone is the whole desktop app
 pub static UI: Dir<'_> = include_dir!("ui-source");
@@ -62,6 +64,8 @@ pub struct App {
     pub logos_dir: PathBuf,
     /// vendor logos from models.dev, by id; a miss is remembered too
     pub logos: Mutex<HashMap<String, Logo>>,
+    /// every call's tokens, from the vendor usage reports in the answers
+    pub usage: usage::Store,
     pub gateway: Gateway,
 }
 
@@ -136,6 +140,7 @@ fn main() -> Result<()> {
     if let Err(e) = std::fs::create_dir_all(&logos_dir) {
         tracing::warn!("failed to create logos dir: {e}");
     }
+    let usage_path = config_path.with_file_name("usage.json");
     let app = Arc::new(App {
         client,
         config: tokio::sync::Mutex::new(cfg),
@@ -144,6 +149,7 @@ fn main() -> Result<()> {
         catalog_path,
         logos_dir,
         logos: Mutex::new(HashMap::new()),
+        usage: usage::Store::load(usage_path),
         gateway: Gateway {
             url: format!("http://{listen}"),
             requests: AtomicU64::new(0),
@@ -464,7 +470,36 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     let status = upstream_res.status();
     let mut headers = upstream_res.headers().clone();
     strip_hop_by_hop(&mut headers);
-    let body = Body::from_stream(upstream_res.bytes_stream());
+
+    // the answer streams through untouched; a bounded copy of its head and
+    // tail is scanned for the vendor's usage report once the stream ends
+    let tee = Arc::new(Mutex::new(usage::Tee::default()));
+    let usage_app = app.clone();
+    let usage_model = recorded_model.to_owned();
+    let body = Body::from_stream(futures::stream::unfold(
+        (upstream_res.bytes_stream(), tee, usage_app, usage_model, status, false),
+        |(mut stream, tee, app, model, status, mut done)| async move {
+            match stream.next().await {
+                Some(Ok(chunk)) => {
+                    tee.lock().unwrap().push(&chunk);
+                    Some((Ok::<_, reqwest::Error>(chunk), (stream, tee, app, model, status, done)))
+                }
+                Some(Err(e)) => {
+                    if !done {
+                        done = true;
+                        usage::record(&app, &model, status, &tee);
+                    }
+                    Some((Err(e), (stream, tee, app, model, status, done)))
+                }
+                None => {
+                    if !done {
+                        usage::record(&app, &model, status, &tee);
+                    }
+                    None
+                }
+            }
+        },
+    ));
     let mut res = Response::builder()
         .status(status)
         .body(body)

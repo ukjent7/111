@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use futures::StreamExt;
 
-const SSE_EXPECTED: &[u8] = b"data: {\"chunk\":1}\n\ndata: {\"chunk\":2}\n\ndata: [DONE]\n\n";
+const SSE_EXPECTED: &[u8] = b"data: {\"chunk\":1}\n\ndata: {\"chunk\":2}\n\ndata: {\"id\":\"c\",\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":800},\"completion_tokens_details\":{\"reasoning_tokens\":60}}}\n\ndata: [DONE]\n\n";
 
 #[derive(Clone, Debug, Default)]
 struct Captured {
@@ -85,6 +85,7 @@ async fn run_checks() -> Vec<Check> {
     checks.extend(binary_scenario(&client, &gateway).await);
     checks.extend(status_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
     checks.extend(ui_scenario(&client, &gateway).await);
+    checks.extend(usage_scenario(&client, &mock_addr.to_string()).await);
     checks.extend(host_scenario(gateway_addr));
     checks.extend(provider_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
     checks.extend(config_scenario(&config, &mock_addr.to_string()));
@@ -441,6 +442,113 @@ async fn get_json_raw(res: reqwest::Response) -> serde_json::Value {
         .unwrap_or_else(|_| serde_json::json!({ "error": text, "status": status.as_u16() }))
 }
 
+/// The Usage tab's numbers, from answers whose vendors reported usage in both
+/// wire shapes — OpenAI's (the prompt includes the cached tokens) and
+/// Anthropic's (input_tokens already excludes them): the tokens of the window
+/// and the pi-style cache hit rate, with the log on disk as the artifact.
+async fn usage_scenario(client: &reqwest::Client, mock_addr: &str) -> Vec<Check> {
+    let addr = free_port();
+    let config = std::env::temp_dir().join(format!("magpie-e2e-usage-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&config);
+    let guard = spawn_gateway(addr, mock_addr.parse().unwrap(), &config, true);
+    let gateway = format!("http://{addr}");
+
+    // an OpenAI-style SSE answer: 1000 prompt with 800 cached → 200 in, 800
+    // read; 100 out, 60 of them reasoning
+    let sse = client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    let _ = sse.bytes().await.unwrap();
+
+    // an Anthropic-style answer: 500 in (cache excluded), 300 read, 200 written
+    // (read to the end: the gateway counts the call when its stream settles)
+    let _ = client
+        .post(format!("{gateway}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(r#"{"model":"claude-x","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    let u: serde_json::Value = client
+        .get(format!("{gateway}/api/usage?period=today"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let stored = std::fs::read(config.with_file_name("usage.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    drop(guard);
+
+    let hit = u["hit_rate"].as_f64();
+    let models = u["models"].as_array().cloned().unwrap_or_default();
+    vec![
+        check(
+            "the usage tab counts the window's tokens across both wire shapes",
+            (u["calls"] == serde_json::json!(2)
+                && u["input"] == serde_json::json!(700)
+                && u["output"] == serde_json::json!(150)
+                && u["cache_read"] == serde_json::json!(1100)
+                && u["cache_write"] == serde_json::json!(200)
+                && u["reasoning"] == serde_json::json!(60)
+                && u["errors"] == serde_json::json!(0))
+                .then(|| {
+                    format!(
+                        "{} calls, {} in, {} out, cached {}/{}",
+                        u["calls"], u["input"], u["output"], u["cache_read"], u["cache_write"]
+                    )
+                })
+                .ok_or_else(|| format!("usage: {u}")),
+        ),
+        check(
+            "the cache hit rate is cache read over the whole reported prompt",
+            (hit == Some(55.0))
+                .then(|| format!("hit rate {hit:?}% (1100 of 2000 prompt tokens)"))
+                .ok_or_else(|| format!("hit_rate was {hit:?} in {u}")),
+        ),
+        check(
+            "the window's series and per-model rows come along",
+            (u["bucket"] == serde_json::json!("hour")
+                && u["series"].as_array().map(|s| s.len()) == Some(24)
+                && models.len() == 2)
+                .then(|| {
+                    format!(
+                        "bucket hour, {} hour buckets, models: {}",
+                        u["series"].as_array().map(|s| s.len()).unwrap_or(0),
+                        models
+                            .iter()
+                            .filter_map(|m| m["name"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .ok_or_else(|| format!("usage: {u}")),
+        ),
+        check(
+            "the usage log lands next to the config for the next launch",
+            stored
+                .as_ref()
+                .and_then(|s| s.as_array())
+                .is_some_and(|a| a.len() == 2)
+                .then(|| "usage.json holds both calls".to_owned())
+                .ok_or_else(|| format!(
+                    "usage.json missing or wrong at {}",
+                    config.with_file_name("usage.json").display()
+                )),
+        ),
+    ]
+}
+
 /// The double-click experience before any provider was ever set: the app
 /// still runs and answers with a clear hint instead of refusing to start.
 async fn no_provider_scenario(client: &reqwest::Client) -> Vec<Check> {
@@ -785,6 +893,14 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
             .header("content-type", "application/json")
             .body(Body::from(r#"{"data":[{"id":"a"},{"id":"b"},{"id":"c"}]}"#))
             .unwrap(),
+        // an Anthropic-style answer: its usage names the cache buckets itself,
+        // and its input_tokens already excludes them
+        "/v1/messages" => Response::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":500,"output_tokens":50,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}"#,
+            ))
+            .unwrap(),
         "/echo" => Response::builder()
             .header("content-type", "application/octet-stream")
             .header("content-encoding", "gzip")
@@ -805,7 +921,8 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
     res
 }
 
-/// chunk 1, a 400 ms silence, chunk 2, done — timed so buffering shows.
+/// chunk 1, a 400 ms silence, chunk 2, the usage report, done — timed so
+/// buffering shows
 fn sse_body() -> Body {
     Body::from_stream(futures::stream::unfold(0u8, |step| async move {
         let (chunk, next, delay): (Bytes, u8, Duration) = match step {
@@ -819,7 +936,14 @@ fn sse_body() -> Body {
                 2,
                 Duration::from_millis(400),
             ),
-            2 => (Bytes::from_static(b"data: [DONE]\n\n"), 3, Duration::ZERO),
+            2 => (
+                Bytes::from_static(
+                    b"data: {\"id\":\"c\",\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":800},\"completion_tokens_details\":{\"reasoning_tokens\":60}}}\n\n",
+                ),
+                3,
+                Duration::ZERO,
+            ),
+            3 => (Bytes::from_static(b"data: [DONE]\n\n"), 4, Duration::ZERO),
             _ => return None,
         };
         tokio::time::sleep(delay).await;

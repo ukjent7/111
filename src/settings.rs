@@ -1,7 +1,6 @@
 //! Settings, usage and session endpoints for the shell UI.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use axum::Json;
 use axum::extract::State;
@@ -158,32 +157,17 @@ pub async fn open(Json(body): Json<Value>) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-pub async fn usage(State(app): State<Arc<App>>) -> Response {
+pub async fn usage(
+    State(app): State<Arc<App>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let period = params.get("period").map(String::as_str).unwrap_or("30d");
     let path = app
         .config_path
         .parent()
         .map(|p| p.join("usage.json").to_string_lossy().into_owned())
         .unwrap_or_default();
-    let requests = app.gateway.requests.load(Ordering::Relaxed);
-    let errors = app.gateway.errors.load(Ordering::Relaxed);
-
-    Json(json!({
-        "calls": requests,
-        "input": 0,
-        "output": 0,
-        "cache_read": 0,
-        "cache_write": 0,
-        "reasoning": 0,
-        "errors": errors,
-        "cost": 0.0,
-        "unpriced": 0,
-        "series": [],
-        "bucket": "day",
-        "agents": [],
-        "models": [],
-        "path": path,
-    }))
-    .into_response()
+    Json(app.usage.summary(period, &path)).into_response()
 }
 
 pub async fn usage_quotas() -> Response {

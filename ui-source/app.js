@@ -3587,7 +3587,7 @@ function renderUsageLoading() {
   const stats = $("#stats");
   stats.classList.remove("empty");
   stats.replaceChildren();
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 2; i++) {
     const tile = el("div", "kpi loading-kpi");
     tile.append(el("span", "skeleton sk-number"), el("span", "skeleton sk-label"));
     stats.append(tile);
@@ -4060,16 +4060,15 @@ function renderUsage() {
     if (sub) t.append(el("small", "", sub));
     stats.append(t);
   };
-  tile(fmtN(tokensOf(u)), t("tokens"), t("{a} in · {b} out", { a: fmtN(u.input), b: fmtN(u.output) }));
-  // cache reads are billed at a fraction of input, so how much of the prompt
-  // came from cache is the number that explains the bill; input here already
-  // excludes the cached tokens (the gateway subtracts them). The written
-  // count is secondary and only fits in the tooltip.
-  const promptTokens = u.input + u.cache_read;
-  const hit = u.cache_read && promptTokens ? t("hit rate {p}", { p: Math.round(100 * u.cache_read / promptTokens) + "%" }) : "";
-  tile(fmtN(u.cache_read), t("cache read"), hit, u.cache_write ? t("{n} written", { n: fmtN(u.cache_write) }) : "");
-  tile(fmtN(u.reasoning), t("reasoning"), t("inside output"));
-  tile(String(u.calls), t(u.calls === 1 ? "call" : "calls"), u.errors ? t("{n} failed", { n: u.errors }) : "");
+  // the two numbers the tab is about: the tokens the window took (cached
+  // reads included — the gateway reports input without them) and the window's
+  // cache hit rate, computed the way pi does it: cache read over the whole
+  // prompt of the calls whose vendor reports caching at all
+  tile(fmtN(u.input + u.output + u.cache_read + u.cache_write), t("tokens"),
+       t("{a} in · {b} out", { a: fmtN(u.input), b: fmtN(u.output) }),
+       u.cache_read || u.cache_write ? t("{n} cached", { n: fmtN(u.cache_read) }) + (u.cache_write ? " · " + t("{n} written", { n: fmtN(u.cache_write) }) : "") : "");
+  tile(u.hit_rate == null ? "—" : u.hit_rate + "%", t("cache hit rate"),
+       u.cache_read ? t("{n} cached", { n: fmtN(u.cache_read) }) : "");
 
   // the timeline: one bar per hour, day or week; output sits on top of input
   const chart = $("#chart");

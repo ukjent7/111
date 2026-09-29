@@ -1,6 +1,6 @@
 [package]
 name = "magpie-gateway"
-version = "0.4.14"
+version = "0.4.15"
 edition = "2024"
 rust-version = "1.98.1"
 description = "Magpie local API gateway with pass-through support"
@@ -9,7 +9,9 @@ authors = ["kk"]
 [dependencies]
 anyhow = "1"
 axum = "0.8"
+futures = "0.3"
 include_dir = "0.7"
+jiff = "0.2"
 mime_guess = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -19,9 +21,6 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wry = "0.57"
-
-[dev-dependencies]
-futures = "0.3"
 
 # CI's `-D warnings`, moved here so the local build, the IDE and the workflow
 # all deny the same things
