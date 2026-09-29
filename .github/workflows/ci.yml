@@ -5,17 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  # a newer push cancels an older run on a pull request; on main every commit
-  # keeps its slot — canceling by ref would leave some pushes with no result
-  # at all, and fmt.yml's dispatch and the release call share a push's sha
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.event_name, github.sha) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # clippy and `cargo test` produce different artifacts, so running both on

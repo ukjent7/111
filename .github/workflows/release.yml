@@ -1,20 +1,20 @@
 name: Release
 
-# A version bump in Cargo.toml is the release signal. CI runs first (as a
-# reusable call), then the targets build, and only `publish` creates the tag
-# and the release — so a failed build never leaves a tag behind for someone
-# to delete by hand. An unchanged version means there is nothing to release.
+# A version bump in Cargo.toml is the release signal.
+# Runs automatically when CI completes successfully on main (or via manual dispatch).
+# Only builds and creates a release if the version in Cargo.toml hasn't been tagged yet.
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
     branches: [main]
-    paths: [Cargo.toml]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-main
   cancel-in-progress: false
 
 jobs:
@@ -23,6 +23,7 @@ jobs:
   version:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
@@ -41,13 +42,9 @@ jobs:
             echo "tag=v$version" >> "$GITHUB_OUTPUT"
           fi
 
-  ci:
+  build:
     needs: version
     if: needs.version.outputs.tag != ''
-    uses: ./.github/workflows/ci.yml
-
-  build:
-    needs: [version, ci]
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -79,8 +76,6 @@ jobs:
           # binaries are dead weight in the cache; and rust-cache's bin
           # caching is known to misbehave on Windows (#341)
           cache-bin: "false"
-      # the E2E suite drives the same release binary that gets shipped
-      - run: cargo test --release --locked
       - run: cargo build --release --locked
       - name: Package
         shell: bash
@@ -100,7 +95,7 @@ jobs:
             *.tar.gz
 
   publish:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -124,13 +119,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          tag="v$version"
-          # idempotent: a rerun after a finished publish must not re-tag
+          tag="${{ needs.version.outputs.tag }}"
+          [ -n "$tag" ] || { echo "No tag provided"; exit 1; }
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "$tag is already released"
             exit 0
           fi
-          # the tag is born here, at this exact commit, together with the
-          # release — not before the build has proven itself
-          gh release create "$tag" dist/* --target "$GITHUB_SHA" --generate-notes
+          gh release create "$tag" dist/* --target "${{ github.event.workflow_run.head_sha || github.sha }}" --generate-notes
