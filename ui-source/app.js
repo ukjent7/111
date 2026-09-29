@@ -877,10 +877,10 @@ async function loadProviders() {
     // did, only them (an account's last sign-in check isn't on it)
     const json = (a) => JSON.stringify(a, (k, v) => (k === "seen" ? undefined : v));
     const same = (a, b) => json(a) === json(b);
-    if (was && !$("#view-gateway").classList.contains("loading") && same({ ...was, gateway: { ...was.gateway, calls: 0 } }, { ...providers, gateway: { ...providers.gateway, calls: 0 } })) {
-      if (!same(was.gateway.calls, providers.gateway.calls)) renderActivity();
-    } else renderGatewayView();
-    backToReader($("#view-gateway"));
+    if (view === "gateway" || view === "models") {
+      renderGatewayView();
+      backToReader($("#view-" + view));
+    } else renderProviders();
   } else renderProviders();
   pollCatalog();
 }
@@ -1065,53 +1065,65 @@ function copyBtn(text, what) {
 
 function renderGatewayLoading() {
   const page = $("#view-gateway");
-  page.classList.add("loading");
-  page.setAttribute("aria-busy", "true");
-  $("#connectNote").textContent = "";
-  $("#callsNote").textContent = "";
-  $("#copyModels").hidden = true;
+  if (page) {
+    page.classList.add("loading");
+    page.setAttribute("aria-busy", "true");
+  }
+  const modelsPage = $("#view-models");
+  if (modelsPage) {
+    modelsPage.classList.add("loading");
+    modelsPage.setAttribute("aria-busy", "true");
+  }
+  const connectNote = $("#connectNote");
+  if (connectNote) connectNote.textContent = "";
+  const copyModels = $("#copyModels");
+  if (copyModels) copyModels.hidden = true;
 
   const gateway = $("#gateway");
-  gateway.replaceChildren();
-  const mark = el("span", "skeleton gw-sk-dot");
-  const who = el("div", "who gw-sk-who");
-  who.append(el("span", "skeleton gw-sk-title"), el("span", "skeleton gw-sk-sub"));
-  gateway.append(mark, who, el("span", "skeleton gw-sk-url"));
+  if (gateway) {
+    gateway.replaceChildren();
+    const mark = el("span", "skeleton gw-sk-dot");
+    const who = el("div", "who gw-sk-who");
+    who.append(el("span", "skeleton gw-sk-title"), el("span", "skeleton gw-sk-sub"));
+    gateway.append(mark, who, el("span", "skeleton gw-sk-url"));
+  }
 
   const connect = $("#connect");
-  connect.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    connect.append(el("span", "skeleton gw-sk-label"));
-    const value = el("div", "gw-sk-field");
-    value.append(el("span", "skeleton"), el("span", "skeleton short"));
-    connect.append(value);
+  if (connect) {
+    connect.replaceChildren();
+    for (let i = 0; i < 4; i++) {
+      connect.append(el("span", "skeleton gw-sk-label"));
+      const value = el("div", "gw-sk-field");
+      value.append(el("span", "skeleton"), el("span", "skeleton short"));
+      connect.append(value);
+    }
   }
 
   const models = $("#gwModels");
-  models.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    const row = el("div", "row model gw-sk-row");
-    row.append(el("span", "skeleton gw-sk-model"), el("span", "grow"), el("span", "skeleton gw-sk-provider"));
-    models.append(row);
-  }
-
-  const activity = $("#activity");
-  activity.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    const row = el("div", "call gw-sk-call");
-    row.append(el("span", "skeleton time"), el("span", "skeleton agent"), el("span", "skeleton model"), el("span", "grow"), el("span", "skeleton result"));
-    activity.append(row);
+  if (models) {
+    models.replaceChildren();
+    for (let i = 0; i < 4; i++) {
+      const row = el("div", "row model gw-sk-row");
+      row.append(el("span", "skeleton gw-sk-model"), el("span", "grow"), el("span", "skeleton gw-sk-provider"));
+      models.append(row);
+    }
   }
 }
 
 function renderGatewayView() {
   const page = $("#view-gateway");
-  page.classList.remove("loading");
-  page.removeAttribute("aria-busy");
+  if (page) {
+    page.classList.remove("loading");
+    page.removeAttribute("aria-busy");
+  }
+  const modelsPage = $("#view-models");
+  if (modelsPage) {
+    modelsPage.classList.remove("loading");
+    modelsPage.removeAttribute("aria-busy");
+  }
   renderGateway();
   renderConnect();
   renderGatewayModels();
-  renderActivity();
 }
 
 // The status card: dot, state, the URL.
@@ -1242,9 +1254,9 @@ function envSnippet(vars) {
 // every exposed model, as the ids agents use
 function gatewayModels() {
   // the routing groups first, as the agents' pickers list them
-  const out = (providers.gateway.groups || []).map((g) => ({ id: g.id, name: g.name, icons: g.icons, group: true,
+  const out = (providers?.gateway?.groups || []).map((g) => ({ id: g.id, name: g.name, icons: g.icons, group: true,
     provider: { name: [t("routing group"), g.providers.join(", ")].filter(Boolean).join(" · ") } }));
-  for (const p of providers.providers) for (const m of p.models) if (m.on) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p });
+  for (const p of (providers?.providers || [])) for (const m of (p.models || [])) if (m.on !== false) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p });
   return out;
 }
 
@@ -1345,27 +1357,33 @@ function highlight(code, lang) {
 }
 
 let modelQuery = "";
-// The model list can be folded away, so Recent calls sits under Connect;
-// the fold is remembered.
 let modelsFolded = false;
 try { modelsFolded = localStorage.getItem("magpie.gwModelsFolded") === "1"; } catch {}
-$("#foldModels").prepend(svg(CHEV_R, 11, 1.6));
-$("#foldModels").onclick = () => {
-  modelsFolded = !modelsFolded;
-  try { localStorage.setItem("magpie.gwModelsFolded", modelsFolded ? "1" : "0"); } catch {}
-  renderGatewayModels();
-  backToReader($("#view-gateway"));
-};
+if ($("#foldModels")) {
+  $("#foldModels").prepend(svg(CHEV_R, 11, 1.6));
+  $("#foldModels").onclick = () => {
+    modelsFolded = !modelsFolded;
+    try { localStorage.setItem("magpie.gwModelsFolded", modelsFolded ? "1" : "0"); } catch {}
+    renderGatewayModels();
+    backToReader($("#view-models") || $("#view-gateway"));
+  };
+}
 
 function renderGatewayModels() {
   const list = $("#gwModels");
+  if (!list) return;
   list.replaceChildren();
   const all = gatewayModels();
   const fold = $("#foldModels");
-  fold.setAttribute("aria-expanded", String(!modelsFolded));
-  fold.title = t(modelsFolded ? "Show the models" : "Fold the models away");
-  $("#modelsCount").textContent = all.length ? String(all.length) : "";
-  list.hidden = modelsFolded && all.length > 0;
+  if (fold) {
+    fold.setAttribute("aria-expanded", String(!modelsFolded));
+    fold.title = t(modelsFolded ? "Show the models" : "Fold the models away");
+    list.hidden = modelsFolded && all.length > 0;
+  } else {
+    list.hidden = false;
+  }
+  const count = $("#modelsCount");
+  if (count) count.textContent = all.length ? String(all.length) : "";
   // the search sits in the section head, beside Copy all ids; typing
   // redraws only the list, so it keeps its focus
   let q = $("#findModel");
@@ -1375,7 +1393,7 @@ function renderGatewayModels() {
     q.className = "find";
     q.oninput = () => { modelQuery = q.value; renderGatewayModels(); };
     q.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape" && q.value) { q.value = modelQuery = ""; renderGatewayModels(); } };
-    $("#copyModels").before(q);
+    $("#copyModels")?.before(q);
   }
   q.hidden = all.length < 8 || list.hidden;
   const words = modelQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -1383,8 +1401,10 @@ function renderGatewayModels() {
     const hay = `${m.id} ${m.name || ""} ${m.provider.name}`.toLowerCase();
     return words.every((w) => hay.includes(w));
   });
-  $("#copyModels").hidden = !models.length || list.hidden;
-  $("#copyModels").onclick = () => copy(models.map((m) => m.id).join("\n"), t("Model ids"));
+  if ($("#copyModels")) {
+    $("#copyModels").hidden = !models.length || list.hidden;
+    $("#copyModels").onclick = () => copy(models.map((m) => m.id).join("\n"), t("Model ids"));
+  }
   if (!all.length) {
     const empty = el("div", "empty-state", "");
     empty.append(el("b", "", t("No models exposed yet")), t("Add a provider, or sign in to Codex or Copilot; their models show up here for every agent."));
@@ -1428,8 +1448,9 @@ function callBodyPanel(label, raw, truncated) {
 }
 
 function renderActivity() {
-  const g = providers.gateway;
+  const g = providers?.gateway;
   const box = $("#activity");
+  if (!box || !g) return;
   box.replaceChildren();
   $("#callsNote").textContent = g.running && !g.mine ? t("shown by the magpie that serves the gateway") : "";
   const calls = g.calls.slice(0, 20);
@@ -3474,6 +3495,19 @@ async function providerAction(action, body, okMsg, base = "provider/") {
     state = await api("state");
     renderAgents();
     if (okMsg) status(okMsg, "ok");
+    if (action === "save" && body?.id) {
+      const p = providers?.providers?.find((x) => x.id === body.id);
+      if (!p || !p.models?.length) {
+        api("provider/models", { id: body.id }).then(async (r) => {
+          if (r?.count) {
+            await loadProviders();
+            renderProviders();
+            renderGatewayView();
+            renderGatewayModels();
+          }
+        }).catch(() => {});
+      }
+    }
   } catch (e) {
     if (!editorError(e.message, "err")) status(e.message, "err");
     document.querySelector(".editor .busy")?.classList.remove("busy");
@@ -4778,13 +4812,16 @@ function show(v) {
   view = v;
   if (mode === "window") { for (const b of $("#nav").querySelectorAll("button")) b.classList.toggle("on", b.dataset.view === v); slide($("#nav"), "nav"); }
   $("#prefs").classList.toggle("on", v === "settings");
-  for (const id of ["providers", "gateway", "usage", "settings"]) $("#view-" + id).hidden = v !== id;
+  for (const id of ["providers", "gateway", "models", "usage", "settings"]) {
+    const el = $("#view-" + id);
+    if (el) el.hidden = v !== id;
+  }
   // back to where the reader was in it, and again once it has what it loads
   const back = () => backToReader($("#view-" + v));
   requestAnimationFrame(back);
   closePicker();
   if (v !== "providers" && editing !== null) cancelEdit();
-  if (v === "providers" || v === "gateway") loadProviders().then(back, (e) => status(e.message, "err"));
+  if (v === "providers" || v === "gateway" || v === "models") loadProviders().then(back, (e) => status(e.message, "err"));
   if (v === "usage") loadUsage().then(back, (e) => status(e.message, "err"));
   if (v === "settings") loadSettings().then(back, (e) => status(e.message, "err"));
   syncURL();
@@ -5012,6 +5049,6 @@ if (mode === "window" && params.get("import")) {
   }).catch(() => {});
 }
 if (mode === "window" && params.get("view") === "providers" && params.get("edit")) editing = params.get("edit");
-if (mode === "window" && ["providers", "gateway", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
+if (mode === "window" && ["providers", "gateway", "models", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
 else if (mode === "window") slide($("#nav"), "nav");
 load();

@@ -16,6 +16,7 @@
   <nav class="seg" id="nav" style="--wails-draggable:no-drag">
     <button data-view="providers" class="on" data-t>Providers</button>
     <button data-view="gateway" data-t>Gateway</button>
+    <button data-view="models" data-t>Models</button>
     <button data-view="usage" data-t>Usage</button>
   </nav>
   <div class="actions" style="--wails-draggable:no-drag">
@@ -58,10 +59,11 @@
   </div>
   <div class="row-head"><span class="label" data-t>Connect</span><span class="grow"></span><span class="note" id="connectNote"></span></div>
   <section class="list connect" id="connect"></section>
-  <div class="row-head"><button class="fold" id="foldModels" aria-expanded="true" aria-controls="gwModels"><span class="label" data-t>Models</span><span class="note" id="modelsCount"></span></button><span class="grow"></span><button class="text" id="copyModels" data-t>Copy all ids</button></div>
+</main>
+
+<main class="view" id="view-models" hidden>
+  <div class="row-head"><span class="label" data-t>Models</span><span class="note" id="modelsCount"></span><span class="grow"></span><button class="text" id="copyModels" data-t>Copy all ids</button></div>
   <div class="list" id="gwModels"></div>
-  <div class="row-head"><span class="label" data-t>Recent calls</span><span class="grow"></span><span class="note" id="callsNote"></span></div>
-  <div class="list activity" id="activity"></div>
 </main>
 
 <main class="view" id="view-usage" hidden>

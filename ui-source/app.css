@@ -894,9 +894,9 @@ body.window .foot { padding-left: 18px; }
 .gw .url:hover { background: var(--pill-hover); box-shadow: inset 0 0 0 1px var(--line); }
 .gw .url code { color: var(--fg-2); font-size: 11px; }
 .gw .url:hover code { color: var(--fg); }
-#view-gateway .row-head, #view-usage .row-head { margin: 14px 0 6px; padding: 0 2px; }
+#view-gateway .row-head, #view-models .row-head, #view-usage .row-head { margin: 14px 0 6px; padding: 0 2px; }
 #view-usage .row-head.quota-head { margin: 6px 0 6px; }
-#view-gateway .row-head .note { font-size: 11px; color: var(--faint); }
+#view-gateway .row-head .note, #view-models .row-head .note { font-size: 11px; color: var(--faint); }
 /* the Models head folds the list away: a chevron, the label, how many */
 .fold { display: inline-flex; align-items: center; gap: 5px; margin-left: -4px; padding: 3px 6px 3px 4px; border-radius: 6px; color: var(--faint); transition: background .12s, color .12s; }
 .fold:hover { background: var(--pill); color: var(--muted); }
@@ -1098,14 +1098,14 @@ body.window .foot { padding-left: 18px; }
 /* the add sheet: presets as tiles, one key away */
 .sheet { padding: 6px 0 8px; flex: none; }
 .sheet .row-head { padding: 0 2px; gap: 6px; }
-.sheet .find, #view-gateway .find { height: 24px; width: 160px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12px; outline: none; transition: border-color .12s; }
-.sheet .find:focus, #view-gateway .find:focus { border-color: var(--accent); }
-.sheet .find::placeholder, #view-gateway .find::placeholder { color: var(--faint); }
+.sheet .find, #view-gateway .find, #view-models .find { height: 24px; width: 160px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12px; outline: none; transition: border-color .12s; }
+.sheet .find:focus, #view-gateway .find:focus, #view-models .find:focus { border-color: var(--accent); }
+.sheet .find::placeholder, #view-gateway .find::placeholder, #view-models .find::placeholder { color: var(--faint); }
 .sheet .kind { font-size: 11.5px; color: var(--muted); padding: 10px 2px 5px; }
 .sheet .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; }
 .sheet .none { padding: 14px 2px; color: var(--muted); font-size: 12px; }
 #gwModels .none { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; }
-#view-gateway .row-head .find { margin-right: 8px; }
+#view-gateway .row-head .find, #view-models .row-head .find { margin-right: 8px; }
 .tile {
   position: relative; display: flex; align-items: center; gap: 10px;
   height: 46px; padding: 0 10px 0 11px; border-radius: 10px; text-align: left; min-width: 0;

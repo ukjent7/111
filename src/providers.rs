@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
@@ -191,10 +192,14 @@ async fn fetch_and_persist_logo(client: &reqwest::Client, logos_dir: &Path, id: 
 pub fn payload(app: &App, cfg: &ConfigState) -> Value {
     let catalog = app.catalog.lock().unwrap();
     let providers: Vec<Value> = cfg.providers.iter().map(|p| enrich(p, &catalog)).collect();
-    let models: usize = cfg
-        .providers
+    let models: usize = providers
         .iter()
-        .map(|p| p.models.iter().filter(|m| m.on).count())
+        .filter_map(|p| p.get("models").and_then(Value::as_array))
+        .map(|arr| {
+            arr.iter()
+                .filter(|m| m.get("on").and_then(Value::as_bool).unwrap_or(true))
+                .count()
+        })
         .sum();
     let calls: Vec<Value> = app
         .gateway
@@ -248,6 +253,30 @@ fn enrich(p: &Provider, catalog: &Value) -> Value {
             {
                 m["name"] = json!(name);
             }
+        }
+    }
+    if out["models"].as_array().map_or(true, |m| m.is_empty()) {
+        let cat_key = if !p.catalog.is_empty() {
+            &p.catalog
+        } else {
+            &p.id
+        };
+        if let Some(cat_models) = catalog
+            .get(cat_key.as_str())
+            .and_then(|c| c.get("models"))
+            .and_then(Value::as_object)
+        {
+            let seeded: Vec<Value> = cat_models
+                .iter()
+                .map(|(id, m)| {
+                    json!({
+                        "id": id,
+                        "on": true,
+                        "name": m.get("name").and_then(Value::as_str).unwrap_or(id),
+                    })
+                })
+                .collect();
+            out["models"] = json!(seeded);
         }
     }
     out
@@ -556,13 +585,36 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     if let Some(on) = req.models {
         rec.models = merge_models(&rec.models, &on);
     }
+    if rec.models.is_empty() {
+        let catalog_key = if !rec.catalog.is_empty() {
+            &rec.catalog
+        } else if let Some(preset) = rec.extra.get("preset").and_then(Value::as_str) {
+            preset
+        } else {
+            &rec.id
+        };
+        let cat = app.catalog.lock().unwrap();
+        if let Some(cat_models) = cat
+            .get(catalog_key)
+            .and_then(|c| c.get("models"))
+            .and_then(Value::as_object)
+        {
+            let ids: Vec<String> = cat_models.keys().cloned().collect();
+            rec.models = merge_models(&rec.models, &ids);
+        }
+    }
     match pos {
-        Some(i) => cfg.providers[i] = rec,
-        None => cfg.providers.push(rec),
+        Some(i) => cfg.providers[i] = rec.clone(),
+        None => cfg.providers.push(rec.clone()),
     }
     if let Some(res) = persisted(&app, &cfg) {
         return res;
     }
+    let id_for_fetch = req.id.clone();
+    let app_for_fetch = app.clone();
+    tokio::spawn(async move {
+        let _ = fetch_models_for_provider(&app_for_fetch, &id_for_fetch).await;
+    });
     Json(payload(&app, &cfg)).into_response()
 }
 
@@ -590,16 +642,10 @@ pub async fn reveal_key(State(app): State<Arc<App>>, Json(body): Json<Value>) ->
     }
 }
 
-/// The vendor's own model list, stored as the provider's models.
-pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
-    let Some(id) = body["id"].as_str().map(str::to_owned) else {
-        return err(StatusCode::BAD_REQUEST, "which provider?");
-    };
+pub async fn fetch_models_for_provider(app: &Arc<App>, id: &str) -> anyhow::Result<usize> {
     let (base, key, anthropic) = {
         let cfg = app.config.lock().await;
-        let Some(p) = cfg.providers.iter().find(|p| p.id == id) else {
-            return err(StatusCode::NOT_FOUND, "no such provider");
-        };
+        let p = cfg.providers.iter().find(|p| p.id == id).context("no such provider")?;
         let base = [p.models_url.as_str(), p.chat.as_str(), p.responses.as_str()]
             .into_iter()
             .find(|s| !s.is_empty())
@@ -612,12 +658,9 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
         (base, p.key.clone(), !p.anthropic.is_empty())
     };
     if base.is_empty() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "this provider has no URL to list models from",
-        );
+        anyhow::bail!("this provider has no URL to list models from");
     }
-    let mut req = app.client.get(&base);
+    let mut req = app.client.get(&base).timeout(Duration::from_secs(5));
     if anthropic {
         if !key.is_empty() {
             req = req.header("x-api-key", &key);
@@ -626,31 +669,12 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
     } else if !key.is_empty() {
         req = req.header(header::AUTHORIZATION, format!("Bearer {key}"));
     }
-    let res = match req.send().await {
-        Ok(res) => res,
-        Err(e) => {
-            return err(
-                StatusCode::BAD_GATEWAY,
-                &format!("the vendor didn't answer: {e}"),
-            );
-        }
-    };
+    let res = req.send().await?;
     if !res.status().is_success() {
-        return err(
-            StatusCode::BAD_GATEWAY,
-            &format!("the vendor answered {}", res.status()),
-        );
+        anyhow::bail!("the vendor answered {}", res.status());
     }
     let text = res.text().await.unwrap_or_default();
-    let list: Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => {
-            return err(
-                StatusCode::BAD_GATEWAY,
-                "the vendor's model list is not JSON",
-            );
-        }
-    };
+    let list: Value = serde_json::from_str(&text).context("the vendor's model list is not JSON")?;
     let ids: Vec<String> = list
         .get("data")
         .or_else(|| list.get("models"))
@@ -667,16 +691,26 @@ pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) 
         })
         .unwrap_or_default();
     if ids.is_empty() {
-        return err(StatusCode::BAD_GATEWAY, "the vendor listed no models");
+        anyhow::bail!("the vendor listed no models");
     }
+    let count = ids.len();
     let mut cfg = app.config.lock().await;
     if let Some(p) = cfg.providers.iter_mut().find(|p| p.id == id) {
         p.models = merge_models(&p.models, &ids);
     }
-    if let Some(res) = persisted(&app, &cfg) {
-        return res;
+    let _ = persist(&app.config_path, &cfg);
+    Ok(count)
+}
+
+/// The vendor's own model list, stored as the provider's models.
+pub async fn fetch_models(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let Some(id) = body["id"].as_str().map(str::to_owned) else {
+        return err(StatusCode::BAD_REQUEST, "which provider?");
+    };
+    match fetch_models_for_provider(&app, &id).await {
+        Ok(count) => (StatusCode::OK, Json(json!({ "count": count }))).into_response(),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e.to_string()),
     }
-    (StatusCode::OK, Json(json!({ "count": ids.len() }))).into_response()
 }
 
 /// Tiny requests: one per API the provider speaks, or one per model when

@@ -82,7 +82,7 @@ try {
     await page.goto(`http://127.0.0.1:${port}/?shell=1`, { waitUntil: 'load' });
     await page.waitForTimeout(1500);
     const brand = await page.textContent('.brand span:last-child');
-    for (const tab of ['Providers', 'Gateway', 'Usage']) {
+    for (const tab of ['Providers', 'Gateway', 'Models', 'Usage']) {
       await page.click(`#nav button:has-text("${tab}")`, { timeout: 5000 }).catch((e) => errors.push(`click ${tab}: ${e.message}`));
       await page.waitForTimeout(800);
     }
