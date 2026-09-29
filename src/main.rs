@@ -472,10 +472,13 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     strip_hop_by_hop(&mut headers);
 
     // the answer streams through untouched; a bounded copy of its head and
-    // tail is scanned for the vendor's usage report once the stream ends
+    // tail is scanned for the vendor's usage report once the stream settles —
+    // either at its declared end (a content-length body ends the stream
+    // without a final poll) or when the upstream runs out of chunks
     let tee = Arc::new(Mutex::new(usage::Tee::default()));
     let usage_app = app.clone();
     let usage_model = recorded_model.to_owned();
+    let usage_len = upstream_res.content_length();
     let body = Body::from_stream(futures::stream::unfold(
         (
             upstream_res.bytes_stream(),
@@ -483,15 +486,22 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
             usage_app,
             usage_model,
             status,
+            usage_len,
+            0u64,
             false,
         ),
-        |(mut stream, tee, app, model, status, mut done)| async move {
+        |(mut stream, tee, app, model, status, len, mut sent, mut done)| async move {
             match stream.next().await {
                 Some(Ok(chunk)) => {
+                    sent += chunk.len() as u64;
                     tee.lock().unwrap().push(&chunk);
+                    if !done && len.is_some_and(|len| sent >= len) {
+                        done = true;
+                        usage::record(&app, &model, status.as_u16(), &tee);
+                    }
                     Some((
                         Ok::<_, reqwest::Error>(chunk),
-                        (stream, tee, app, model, status, done),
+                        (stream, tee, app, model, status, len, sent, done),
                     ))
                 }
                 Some(Err(e)) => {
@@ -499,7 +509,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
                         done = true;
                         usage::record(&app, &model, status.as_u16(), &tee);
                     }
-                    Some((Err(e), (stream, tee, app, model, status, done)))
+                    Some((Err(e), (stream, tee, app, model, status, len, sent, done)))
                 }
                 None => {
                     if !done {

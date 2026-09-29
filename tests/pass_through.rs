@@ -448,8 +448,12 @@ async fn get_json_raw(res: reqwest::Response) -> serde_json::Value {
 /// and the pi-style cache hit rate, with the log on disk as the artifact.
 async fn usage_scenario(client: &reqwest::Client, mock_addr: &str) -> Vec<Check> {
     let addr = free_port();
-    let config = std::env::temp_dir().join(format!("magpie-e2e-usage-{}.json", std::process::id()));
-    let _ = std::fs::remove_file(&config);
+    // its own directory, so the usage.json it writes (and loads at boot) is
+    // not the one the earlier scenarios' gateway shares through the temp dir
+    let dir = std::env::temp_dir().join(format!("magpie-e2e-usage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("config.json");
     let guard = spawn_gateway(addr, mock_addr.parse().unwrap(), &config, true);
     let gateway = format!("http://{addr}");
 
