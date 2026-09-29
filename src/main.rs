@@ -696,12 +696,15 @@ async fn quit() -> Response {
 /// tint). The desktop shell is the gateway's own webview and already owns
 /// its window, so these answer politely and change nothing — except tint,
 /// whose answer tells the page it painted over nothing.
-async fn window_action(axum::extract::Path(_action): axum::extract::Path<String>) -> Response {
-    (
-        [(header::CONTENT_TYPE, "application/json")],
-        r#"{"ok":false}"#.to_owned(),
-    )
-        .into_response()
+async fn window_action(axum::extract::Path(action): axum::extract::Path<String>) -> Response {
+    if action == "tint" {
+        return (
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"ok":false}"#.to_owned(),
+        )
+            .into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// the page's Copy buttons: the webview refuses the page's own clipboard

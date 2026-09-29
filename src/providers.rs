@@ -249,17 +249,17 @@ pub async fn favicon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Re
     } else {
         format!("https://{url}")
     };
-    let Some(host) = reqwest::Url::parse(&full)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-    else {
+    let Some((scheme, host)) = reqwest::Url::parse(&full).ok().and_then(|u| {
+        Some((u.scheme().to_owned(), u.host_str()?.to_owned()))
+    }) else {
         return err(StatusCode::BAD_REQUEST, "that is not a URL");
     };
     // Google's favicon service has almost every site; the site's own
-    // /favicon.ico is there for when it has none
+    // /favicon.ico is there for when it has none — asked where the base URL
+    // itself is asked, so a plain-HTTP relay's site works too
     let urls = [
         format!("https://www.google.com/s2/favicons?domain={host}&sz=64"),
-        format!("https://{host}/favicon.ico"),
+        format!("{scheme}://{host}/favicon.ico"),
     ];
     let client = app.client();
     for url in urls {
