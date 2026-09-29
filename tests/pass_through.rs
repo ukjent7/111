@@ -257,8 +257,8 @@ async fn provider_scenario(
                 && status.is_success()
                 && mime.starts_with("image/")
                 && cc.contains("max-age="))
-                .then(|| format!("{id}: {status} {mime} cc={cc}"))
-                .ok_or_else(|| format!("{id}: icon {icon:?}, {status} {mime}, cc {cc:?}")),
+            .then(|| format!("{id}: {status} {mime} cc={cc}"))
+            .ok_or_else(|| format!("{id}: icon {icon:?}, {status} {mime}, cc {cc:?}")),
         )
     };
 
