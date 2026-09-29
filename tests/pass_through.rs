@@ -1268,7 +1268,13 @@ async fn icons_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str
                     .and_then(|v| v.to_str().ok())
                     == Some("image/png"))
             .then(|| format!("{icon} served as image/png"))
-            .ok_or_else(|| format!("icon {icon:?}, GET {}, source answered {}", served.status(), answer)),
+            .ok_or_else(|| {
+                format!(
+                    "icon {icon:?}, GET {}, source answered {}",
+                    served.status(),
+                    answer
+                )
+            }),
         ));
     }
     checks
