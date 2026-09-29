@@ -681,12 +681,11 @@ fn api_proto(p: &Provider) -> Api {
 }
 
 /// Everything after a `/v1` of its own: OpenAI's two dialects put the version
-/// in both the client's path and the base URL, so it is counted once. A path
-/// that merely starts with those letters (`/v1beta`) is left alone.
+/// in both the client's path and the base URL, so it is counted once — and
+/// the slash of the prefix stays, so the rest still starts with one. A path
+/// that merely starts with those letters (`/v1beta`) never comes here.
 fn after_v1(path: &str) -> &str {
-    path.strip_prefix("/v1/")
-        .or_else(|| (path == "/v1").then_some("/"))
-        .unwrap_or(path)
+    path.strip_prefix("/v1").unwrap_or(path)
 }
 
 // ---------- the editor's endpoints ----------
