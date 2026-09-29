@@ -1,6 +1,6 @@
 [package]
 name = "magpie-gateway"
-version = "0.4.11"
+version = "0.4.12"
 edition = "2024"
 rust-version = "1.98.1"
 description = "Magpie local API gateway with pass-through support"

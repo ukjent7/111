@@ -3549,7 +3549,6 @@ function renderUsageLoading() {
     seg.append(b);
   }
   slide(seg, "period");
-  $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
   renderQuotas();
   const stats = $("#stats");
   stats.classList.remove("empty");
@@ -4005,15 +4004,6 @@ function renderUsage() {
     seg.append(b);
   }
   slide(seg, "period");
-  const cost = $("#usageCost");
-  cost.replaceChildren();
-  const c = fmtCost(u);
-  if (c) {
-    cost.append(el("b", "", "≈" + c), el("span", "", t("list price")));
-    cost.title = u.unpriced ? t(u.unpriced === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n: u.unpriced }) : t("At each model's list price on models.dev");
-  } else if (u.calls) {
-    cost.append(el("span", "", t("no price for these models")));
-  }
 
   const stats = $("#stats");
   stats.replaceChildren();
@@ -4107,9 +4097,8 @@ function renderUsage() {
 // The agents' own sessions, read from their session files: what each cost,
 // and the command that picks it up again. A segment of the Usage page.
 
-const USAGE_TABS = [["usage", "Overview"], ["sessions", "Sessions"]];
+const USAGE_TABS = [["usage", "Overview"]];
 let usageTab = "usage";
-try { if (localStorage.getItem("magpie.usageTab") === "sessions") usageTab = "sessions"; } catch {}
 let sessions = null; // { sessions, terminal, dirs }
 let sessAgent = "all";
 let sessQuery = "";
@@ -4137,7 +4126,6 @@ function renderUsageTab() {
       if (id === usageTab) return;
       usageTab = id;
       try { localStorage.setItem("magpie.usageTab", id); } catch {}
-      $("#usageCost").replaceChildren();
       loadUsage().catch((e) => status(e.message, "err"));
     };
     seg.append(b);
@@ -4166,7 +4154,6 @@ function renderSessionsLoading() {
   const view = $("#view-usage");
   view.classList.add("loading");
   view.setAttribute("aria-busy", "true");
-  $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
   renderSessRange(true);
   $("#sessAgent").replaceChildren();
   $("#sessModel").hidden = $("#sessFolder").hidden = true;
@@ -4312,15 +4299,8 @@ function renderSessions() {
   // active time isn't told apart by model
   const active = sessModel ? null : acts.filter((a) => byAgent(a) && byFolder(a)).reduce((n, a) => n + a.seconds, 0);
 
-  const cost = $("#usageCost");
-  cost.replaceChildren();
-  cost.title = "";
   const c = tot.cost ? fmtCost(tot) : "";
   const unpricedNote = tot.unpriced ? t("Not counted: {models}, with no known price", { models: [...unpriced].join(", ") }) : t("At each model's list price on models.dev");
-  if (c) {
-    cost.append(el("b", "", "≈" + c), el("span", "", t("list price")));
-    cost.title = unpricedNote;
-  }
 
   const stats = $("#sessStats");
   stats.replaceChildren();
