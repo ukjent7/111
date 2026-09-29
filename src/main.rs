@@ -22,9 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
-mod import;
 mod providers;
-mod sessions;
 mod settings;
 mod update;
 mod usage;
@@ -73,8 +71,6 @@ pub struct App {
     /// the update check's state, and where a download stages the new binary
     pub update: update::Update,
     pub update_path: PathBuf,
-    /// the agents' sessions, read from their files and kept for a few seconds
-    pub sessions: Mutex<Option<(Instant, Arc<Vec<sessions::Session>>)>>,
     pub gateway: Gateway,
 }
 
@@ -195,7 +191,6 @@ fn main() -> Result<()> {
         usage: usage::Store::load(usage_path),
         update: update::Update::default(),
         update_path,
-        sessions: Mutex::new(None),
         gateway: Gateway {
             url: format!("http://{listen}"),
             requests: AtomicU64::new(0),
@@ -238,11 +233,6 @@ fn main() -> Result<()> {
         .route("/api/copy", post(copy))
         .route("/api/usage", get(settings::usage))
         .route("/api/usage/quotas", get(settings::usage_quotas))
-        .route("/api/sessions", get(sessions::list))
-        .route("/api/sessions/stats", get(sessions::stats))
-        .route("/api/sessions/terminal", post(sessions::terminal))
-        .route("/api/importapps", get(import::sources).post(import::run))
-        .route("/api/import/icon", post(providers::import_icon))
         .route("/api/davsync", get(settings::davsync))
         .route("/api/drift", get(settings::drift))
         .fallback(entry)

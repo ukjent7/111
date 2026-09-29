@@ -507,62 +507,6 @@ body.window .field.solo { grid-column: auto; }
 .usage-pane { display: flex; flex-direction: column; flex: none; }
 .usage-pane[hidden] { display: none; }
 
-/* ---- sessions, a segment of usage ------------------------------------------ */
-.sess-tools { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; flex: none; }
-.sess-tools .grow { flex: 1; }
-.sess-filter { width: 220px; max-width: 100%; height: 26px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font-size: 12px; outline: none; }
-.sess-filter:focus { border-color: var(--accent); }
-.sess-tools { flex-wrap: wrap; row-gap: 6px; }
-.sess-pick { flex: none; display: inline-flex; align-items: center; gap: 4px; max-width: 180px; height: 26px; padding: 0 7px 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--muted); font: inherit; font-size: 12px; cursor: default; }
-.sess-pick span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-pick svg { flex: none; opacity: .7; transition: transform .15s var(--ease); }
-.sess-pick:hover { background: var(--pill); }
-.sess-pick.set { color: var(--fg); border-color: var(--line-2); background: var(--pill); }
-.sess-pick.open svg { transform: rotate(180deg); }
-.pop.proto-menu.sess-menu { width: 300px; max-height: min(360px, 70vh); overflow-y: auto; overscroll-behavior: contain; }
-.sess-menu .pm-name, .sess-menu .pm-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-chart-head { display: flex; align-items: center; gap: 8px; margin: -2px 0 8px; }
-.sess-chart-head .label { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
-.sess-chart-head .grow { flex: 1; }
-.sess-chart-head .segs { align-self: center; }
-.sess-chart-head .segs .opt { height: 20px; padding: 0 9px; font-size: 11px; }
-.chart .sess-chart-head .peak { margin: 0; align-self: flex-end; }
-/* the last day's label is wider than its bar at 90 days: let it spill left, not off the card */
-.sess-chart .labels span:last-child { display: flex; justify-content: flex-end; }
-.sess-list { margin-top: 8px; }
-.sess-sk { flex-direction: column; align-items: stretch; justify-content: center; gap: 7px; min-height: 48px; }
-.sess-item + .sess-item { border-top: 1px solid var(--line-2); }
-.sess-item.open { background: color-mix(in srgb, var(--pill) 45%, transparent); }
-.row.sess { cursor: default; min-height: 46px; }
-.row.sess:hover { background: var(--pill); }
-.row.sess .num { display: flex; flex-direction: column; align-items: flex-end; flex: none; min-width: 64px; font-variant-numeric: tabular-nums; }
-.row.sess .num b { font-weight: 600; }
-.row.sess .num small { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
-.row.sess .cost { flex: none; min-width: 58px; text-align: right; color: var(--green); font-variant-numeric: tabular-nums; font-size: 12px; }
-.row.sess .cost.none { color: var(--faint); }
-.sess-resume { flex: none; height: 24px; padding: 0 10px; border-radius: 7px; border: 0; background: var(--pill); color: var(--fg); font-size: 11.5px; font-weight: 500; white-space: nowrap; }
-.sess-resume:hover { background: var(--pill-hover); }
-.sess-resume.done { background: var(--green-soft); color: var(--green); }
-.sess-term { flex: none; }
-.sess-detail { display: flex; flex-direction: column; gap: 5px; padding: 2px 12px 11px 38px; font-size: 11.5px; user-select: text; -webkit-user-select: text; }
-.sess-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.sess-line .k { flex: 0 0 64px; color: var(--muted); }
-.sess-line .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); }
-.sess-line code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--code); font-size: 11px; padding: 2px 6px; border-radius: 5px; background: var(--pill); }
-.sess-line .copy { flex: none; }
-.sess-models { display: grid; grid-template-columns: minmax(0, auto) 1fr auto; gap: 3px 12px; margin: 3px 0 2px 72px; font-variant-numeric: tabular-nums; }
-.sess-models .model { font-family: var(--code); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-models .n { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sess-models .c { text-align: right; color: var(--green); }
-.sess-models .c.none { color: var(--faint); }
-@media (max-width: 560px) {
-  .row.sess .num small { display: none; }
-  .sess-filter { width: 150px; }
-  .sess-models { margin-left: 0; grid-template-columns: minmax(0, 1fr) auto; }
-  .sess-models .n { display: none; }
-  .sess-detail { padding-left: 12px; }
-}
-
 /* ---- the panel's tabs: agents, usage, profiles ---------------------------- */
 /* outside the scrolling page, so they stay put under the header */
 .ptabs { position: relative; display: flex; flex: none; gap: 2px; margin: 0 12px 8px; }
@@ -1197,7 +1141,6 @@ body.window .foot { padding-left: 18px; }
 .editor .more .inner { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px 14px; align-items: start; padding-top: 8px; }
 .editor .warnbox { grid-column: 1 / -1; font-size: 12px; line-height: 1.5; color: var(--fg); background: color-mix(in srgb, var(--amber) 12%, transparent); border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent); border-radius: 8px; padding: 8px 10px; }
 .editor .warnbox.soft { background: none; color: var(--amber); border: 0; padding: 0 0 0 86px; }
-.editor.import .mchips .mchip { cursor: default; }
 .editor .bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px; padding-top: 10px; border-top: 1px solid var(--line-2); margin-top: 2px; }
 .editor .bar .danger { margin-left: -7px; }
 .editor .editor-error { grid-column: 1 / -1; font-size: 12px; line-height: 1.45; color: var(--red); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
@@ -1359,40 +1302,6 @@ body.panel .modal { padding: 16px 12px; }
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
   .skeleton { animation: none !important; }
 }
-
-/* Import from other apps: a checklist per app */
-.editor.importapps { grid-template-columns: minmax(0, 1fr); }
-.editor.importapps .appnote { font-size: 12px; color: var(--muted); line-height: 1.5; }
-.editor.importapps .applist { display: flex; flex-direction: column; gap: 14px; max-height: min(56vh, 460px); overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
-.editor.importapps .apptabs { display: flex; gap: 4px; padding: 3px; border-radius: 10px; background: var(--pill); overflow-x: auto; scrollbar-width: none; }
-.editor.importapps .apptab { flex: 1 1 0; min-width: max-content; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 6px 12px; border-radius: 7px; font-size: 12.5px; font-weight: 500; color: var(--muted); white-space: nowrap; }
-.editor.importapps .apptab:hover { color: var(--fg); }
-.editor.importapps .apptab.on { background: var(--card); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.18); }
-.editor.importapps .apptab.missing .applogo { filter: grayscale(1); opacity: .5; }
-.editor.importapps .apptab .count { min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 10.5px; line-height: 16px; text-align: center; color: var(--fg-2); background: var(--line); }
-.editor.importapps .apptab.missing .count { background: none; color: var(--faint); }
-.editor.importapps .apphead > .applogo, .editor.importapps .apphead > b { display: none; }
-.editor.importapps .apphead { display: flex; align-items: baseline; gap: 8px; padding-bottom: 4px; }
-.editor.importapps .apphead b { font-weight: 600; font-size: 13px; flex: none; }
-.editor.importapps .apphead { align-items: center; }
-.editor.importapps .applogo { width: 18px; height: 18px; flex: none; border-radius: 4px; }
-.editor.importapps .appall { flex: none; display: flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 400; color: var(--muted); text-align: left; cursor: pointer; padding-right: 6px; }
-.editor.importapps .appall input { margin: 0; accent-color: var(--fg); }
-.editor.importapps .apphead code { flex: 1; min-width: 0; font: 11px var(--code); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editor.importapps .appempty { font-size: 12px; color: var(--muted); padding: 2px 0 4px; }
-.editor.importapps .approw { text-align: left; font-weight: 400; color: var(--fg); display: flex; align-items: flex-start; gap: 10px; padding: 8px 6px; border-radius: 8px; cursor: pointer; }
-.editor.importapps .approw:hover:not(.dim) { background: var(--pill); }
-.editor.importapps .approw.dim { cursor: default; opacity: .55; }
-.editor.importapps .approw input { margin: 3px 0 0; accent-color: var(--fg); flex: none; }
-.editor.importapps .approw .ic { width: 18px; height: 18px; flex: none; margin-top: 1px; }
-.editor.importapps .approw .appwho { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.editor.importapps .approw .name { display: flex; align-items: baseline; gap: 6px; font-size: 13px; }
-.editor.importapps .approw .name .from { font-size: 11px; color: var(--muted); }
-.editor.importapps .approw .sub { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
-.editor.importapps .approw .segs { margin-top: 3px; max-width: 100%; overflow-x: auto; }
-.editor.importapps .approw .segs .opt { white-space: nowrap; flex: none; }
-.editor.importapps .apptag { flex: none; font-size: 11px; color: var(--fg-2); background: var(--pill); border-radius: 5px; padding: 1px 6px; margin-top: 1px; }
-.editor.importapps .bar .note { font-size: 12px; color: var(--muted); }
 
 .editor label.tick { display: flex; align-items: center; gap: 7px; text-align: left; padding-top: 0; color: var(--fg-2); cursor: pointer; }
 .editor label.tick input { margin: 0; }

@@ -282,28 +282,6 @@ pub async fn favicon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Re
     err(StatusCode::BAD_GATEWAY, "no icon found for that site")
 }
 
-/// A picture fetched from a link, as an import describes it. It lands in the
-/// icons folder and nowhere else.
-pub async fn import_icon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
-    let Some(url) = body["url"].as_str().map(str::trim) else {
-        return err(StatusCode::BAD_REQUEST, "no URL given");
-    };
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return err(StatusCode::BAD_REQUEST, "that is not a URL");
-    }
-    let client = app.client();
-    if let Ok(res) = client.get(url).timeout(Duration::from_secs(8)).send().await
-        && res.status().is_success()
-        && let Ok(bytes) = res.bytes().await
-        && let Some(ext) = image_ext(&bytes)
-    {
-        let id = icon_id();
-        store_logo(&app.logos_dir, &id, ext, &bytes);
-        return Json(json!({ "icon": format!("file:{id}") })).into_response();
-    }
-    err(StatusCode::BAD_GATEWAY, "couldn't fetch that picture")
-}
-
 async fn fetch_and_persist_logo(client: &reqwest::Client, logos_dir: &Path, id: &str) -> Logo {
     for (ext, mime) in [("svg", "image/svg+xml"), ("png", "image/png")] {
         let url = format!("https://models.dev/logos/{id}.{ext}");

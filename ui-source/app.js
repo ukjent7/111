@@ -38,8 +38,6 @@ let editing = null; // provider id being edited; { preset } or { custom: true } 
 let draft = null; // the editor's working copy
 let naming = null; // the provider whose models' names and levels are open in its editor
 let adding = false; // the preset sheet is open
-let importing = null; // a magpie://import link waiting for a yes: { provider, error, replaces }
-let importingApps = null; // the Import from other apps dialog: { sources, picks }
 // the gateway tab's choices, kept per machine
 let flavor = params.get("flavor") || localStorage.getItem("magpie.flavor") || "openai"; // which API the snippets speak
 let lang = params.get("lang") || localStorage.getItem("magpie.lang") || "shell";        // which snippet
@@ -798,7 +796,7 @@ $("#q").addEventListener("keydown", (e) => {
 document.addEventListener("mousedown", (e) => { if (pick && !$("#pop").contains(e.target)) closePicker(); });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || pick) return;
-  if (editing !== null || importingApps) cancelEdit();
+  if (editing !== null) cancelEdit();
   else if (mode === "panel") api("window/hide", {});
 });
 
@@ -978,8 +976,6 @@ function renderProviders() {
   }
   renderExcluded();
   dialog = renderAdd() || dialog;
-  if (importing) dialog = renderImport(importing);
-  if (importingApps) dialog = renderImportApps(importingApps);
   if (dialog) openModal(dialog); else closeModal();
   view.scrollTop = top;
 }
@@ -1533,10 +1529,6 @@ function renderAdd() {
   q.className = "find";
   q.oninput = () => { presetQuery = q.value; drawTiles(); };
   head.append(q);
-  const imp = el("button", "text", t("Import…"));
-  imp.title = t("Bring over providers set up in other apps");
-  imp.onclick = openImportApps;
-  head.append(imp);
   if (providers.providers.length) {
     const x = el("button", "text", t("Close"));
     x.onclick = () => { adding = false; editing = null; draft = null; presetQuery = ""; renderProviders(); };
@@ -1666,7 +1658,7 @@ function input(value, placeholder, type = "text") {
   i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") cancelEdit(); };
   return i;
 }
-function cancelEdit() { editing = null; draft = null; importing = null; importingApps = null; renderProviders(); }
+function cancelEdit() { editing = null; draft = null; renderProviders(); }
 
 // Custom request headers: the draft keeps them as an ordered [name, value,
 // json?] list so a half-typed row (and its open JSON editor) survives a
@@ -2342,289 +2334,6 @@ function parseContexts(text) {
     if (n > 0) map[id] = n;
   }
   return { map };
-}
-
-// fetchImportIcon asks the server to download the vendor's own logo, named
-// by the link. It swaps the header mark when it lands; a failure is silent
-// (the generic outline stays), since the icon is decoration, not the deal.
-function fetchImportIcon(p, head, ed) {
-  const host = hostOf(p.iconUrl);
-  const note = el("div", "hint", t("Fetching {host}’s icon…", { host: host || t("the vendor") }));
-  ed.append(note);
-  api("import/icon", { url: p.iconUrl }).then((r) => {
-    p.icon = r.icon;
-    delete p.iconUrl;
-    const old = head.firstChild;
-    const now = icon(p.icon);
-    old ? old.replaceWith(now) : head.prepend(now);
-    note.remove();
-  }).catch(() => note.remove());
-}
-
-// renderImport: what a magpie://import link would add, for the user to
-// check. Nothing is saved until they press Add; the key stays hidden unless
-// they ask to see it.
-// Providers other apps (CC Switch, Alma) have set up, for the user to pick
-// from. magpie only reads those apps; the keys stay on the server side and
-// the dialog sees them masked.
-async function openImportApps() {
-  importingApps = { loading: true, sources: [], picks: {} };
-  renderProviders();
-  try {
-    const sources = await api("importapps");
-    const picks = {};
-    for (const s of sources) for (const it of s.items) {
-      if (it.skip || it.status === "same") continue;
-      picks[s.id + "\n" + it.ref] = { on: !it.off && (it.status !== "taken" || !!it.keyOf), mode: it.keyOf ? "key" : "add" };
-    }
-    if (!importingApps) return;
-    importingApps = { sources, picks };
-  } catch (e) {
-    if (!importingApps) return;
-    importingApps = { error: e.message, sources: [], picks: {} };
-  }
-  renderProviders();
-}
-
-// appIcon is an import source's logo; Claude Code has its mark among the
-// vendor icons rather than an app tile of its own.
-const appIcon = (id) => id === "claude-code" ? "icons/claudecode-color.svg" : id === "codex" ? "icons/codex-color.svg" : `icons/app-${id}.png`;
-
-function renderImportApps(ia) {
-  const ed = el("div", "editor new importapps");
-  ed.onclick = (e) => e.stopPropagation();
-  const h = el("div", "ehead");
-  h.append(el("b", "", t("Import from other apps")));
-  ed.append(h);
-  const bar = el("div", "bar");
-  const count = el("span", "note grow");
-  const cancel = el("button", "text", t("Cancel"));
-  cancel.onclick = cancelEdit;
-  const go = el("button", "text primary", t("Import"));
-  const recount = () => {
-    const n = Object.values(ia.picks).filter((x) => x.on).length;
-    count.textContent = n ? t("{n} selected", { n }) : "";
-    go.disabled = !n;
-  };
-  bar.append(count, cancel, go);
-  if (ia.loading) {
-    ed.append(el("div", "appnote", t("Reading other apps…")), bar);
-    go.disabled = true;
-    return ed;
-  }
-  if (ia.error) {
-    ed.append(el("div", "warnbox", ia.error), bar);
-    go.disabled = true;
-    return ed;
-  }
-  ed.append(el("div", "appnote", t("magpie reads these apps' settings and changes nothing in them. Pick the providers to bring over.")));
-  // one tab per app magpie can import from, so which ones it can is plain
-  // at a glance; each shows how many providers it has to bring over
-  const tabs = el("div", "apptabs");
-  tabs.setAttribute("role", "tablist");
-  const list = el("div", "applist");
-  const secs = {};
-  const pickable = (s) => s.items.some((it) => ia.picks[s.id + "\n" + it.ref]);
-  if (!ia.sources.some((s) => s.id === ia.tab)) {
-    ia.tab = (ia.sources.find(pickable) || ia.sources.find((s) => s.found) || ia.sources[0])?.id;
-  }
-  const showTab = (id) => {
-    ia.tab = id;
-    for (const [sid, [tab, sec]] of Object.entries(secs)) {
-      tab.classList.toggle("on", sid === id);
-      tab.setAttribute("aria-selected", String(sid === id));
-      sec.hidden = sid !== id;
-    }
-    list.scrollTop = 0;
-  };
-  for (const s of ia.sources) {
-    const sec = el("div", "appsrc");
-    const tab = el("button", "apptab" + (s.found && !s.error ? "" : " missing"));
-    tab.setAttribute("role", "tab");
-    const tlogo = el("img", "applogo");
-    tlogo.src = appIcon(s.id);
-    tlogo.alt = "";
-    tlogo.draggable = false;
-    const n = s.items.filter((it) => ia.picks[s.id + "\n" + it.ref]).length;
-    tab.append(tlogo, el("span", "", s.name), el("span", "count", s.found && !s.error ? String(n) : "–"));
-    tab.title = s.found ? (s.error || t(n === 1 ? "1 provider to bring over" : "{n} providers to bring over", { n })) : t("Not found on this computer");
-    tab.onclick = () => showTab(s.id);
-    tabs.append(tab);
-    secs[s.id] = [tab, sec];
-    const sh = el("div", "apphead");
-    const logo = el("img", "applogo");
-    logo.src = appIcon(s.id);
-    logo.alt = "";
-    logo.draggable = false;
-    sh.append(logo, el("b", "", s.name), el("code", "", s.path.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")));
-    sec.append(sh);
-    if (!s.found) sec.append(el("div", "appempty", t("Not found on this computer")));
-    else if (s.error) sec.append(el("div", "appempty", s.error));
-    else if (!s.items.length) sec.append(el("div", "appempty", t("No providers in it")));
-    // everything this app has that can come over, on or off at once
-    const mine = s.items.map((it) => ia.picks[s.id + "\n" + it.ref]).filter(Boolean);
-    const boxes = [];
-    const all = el("input");
-    all.type = "checkbox";
-    const allState = () => {
-      const n = mine.filter((x) => x.on).length;
-      all.checked = n > 0 && n === mine.length;
-      all.indeterminate = n > 0 && n < mine.length;
-    };
-    const tick = () => { allState(); recount(); };
-    for (const it of s.items) sec.append(importAppRow(ia, s, it, tick, boxes));
-    if (mine.length) {
-      const lab = el("label", "appall");
-      all.onchange = () => {
-        for (const x of mine) x.on = all.checked;
-        for (const b of boxes) b.checked = all.checked;
-        tick();
-      };
-      lab.append(all, el("span", "", t("Select all")));
-      sh.append(lab);
-      allState();
-    }
-    list.append(sec);
-  }
-  ed.append(tabs, list);
-  showTab(ia.tab);
-  go.onclick = async () => {
-    const picks = [];
-    for (const [k, v] of Object.entries(ia.picks)) {
-      if (!v.on) continue;
-      const [source, ref] = k.split("\n");
-      picks.push({ source, ref, mode: v.mode });
-    }
-    go.classList.add("busy");
-    try {
-      const r = await api("importapps", { picks });
-      providers = r.state;
-      importingApps = null;
-      adding = false;
-      editing = null;
-      draft = null;
-      renderProviders();
-      state = await api("state");
-      renderAgents();
-      status(t("Imported {n}: {names}", { n: r.added.length, names: r.added.join(", ") }), "ok");
-    } catch (e) {
-      go.classList.remove("busy");
-      if (!editorError(e.message, "err")) status(e.message, "err");
-    }
-  };
-  ed.append(bar);
-  recount();
-  return ed;
-}
-
-function importAppRow(ia, s, it, recount, boxes) {
-  const p = it.provider;
-  const pick = ia.picks[s.id + "\n" + it.ref];
-  const row = el("label", "approw" + (pick ? "" : " dim"));
-  const box = el("input");
-  box.type = "checkbox";
-  box.checked = !!pick?.on;
-  box.disabled = !pick;
-  box.onchange = () => { pick.on = box.checked; recount(); };
-  if (pick) boxes.push(box);
-  const who = el("div", "appwho");
-  const name = el("div", "name");
-  name.append(el("span", "", p.name || it.ref));
-  if (it.from) name.append(el("span", "from", it.from));
-  who.append(name);
-  const bits = [];
-  const host = hostOf(p.anthropic || p.chat || p.responses || "");
-  if (it.skip) bits.push(t(it.skip));
-  else {
-    if (host) bits.push(host);
-    if (p.key) bits.push(p.key);
-    if (p.models?.length) bits.push(t(p.models.length === 1 ? "1 model" : "{n} models", { n: p.models.length }));
-  }
-  who.append(el("div", "sub", bits.join(" · ")));
-  if (pick && it.off) who.append(el("div", "sub", t(it.off)));
-  if (pick && (it.keyOf || it.status === "taken")) {
-    const opts = [];
-    if (it.keyOf) opts.push(["key", t("Add as another key")]);
-    opts.push(["add", t(it.status === "taken" ? "Keep both" : "Add as a new provider")]);
-    if (it.status === "taken") opts.push(["replace", t("Replace it")]);
-    who.append(el("div", "sub", t("magpie has {name} already", { name: it.existing })));
-    const sg = segs(opts, pick.mode, (m) => { pick.mode = m; if (!pick.on) { pick.on = box.checked = true; recount(); } });
-    sg.onclick = (e) => e.preventDefault(); // a click on a choice is not a click on the checkbox
-    who.append(sg);
-  }
-  let tag = null;
-  if (it.status === "same") tag = el("span", "apptag", t("Already added"));
-  else if (it.skip) tag = el("span", "apptag", t("Can't import"));
-  else if (it.status === "taken") tag = el("span", "apptag", t("Name in use"));
-  else if (it.keyOf) tag = el("span", "apptag", t("Same vendor"));
-  row.append(box, icon(p.icon || "generic"), who);
-  if (tag) row.append(tag);
-  return row;
-}
-
-function renderImport(im) {
-  const ed = el("div", "editor new import");
-  ed.onclick = (e) => e.stopPropagation();
-  const p = im.provider || {};
-  const h = el("div", "ehead");
-  h.append(icon(p.icon || "generic"), el("b", "", im.error ? t("Import link") : p.name));
-  if (!im.error) h.append(el("span", "note", t("from a link")));
-  ed.append(h);
-  const bar = el("div", "bar");
-  bar.append(el("span", "grow"));
-  const cancel = el("button", "text", t(im.error ? "Close" : "Cancel"));
-  cancel.onclick = cancelEdit;
-  bar.append(cancel);
-  if (im.error) {
-    ed.append(el("div", "warnbox", t("This link can't be imported: {e}", { e: im.error })), bar);
-    return ed;
-  }
-
-  const hosts = [...new Set([p.chat, p.responses, p.anthropic].filter(Boolean).map(hostOf))];
-  ed.append(el("div", "warnbox", t("Added from a link. Your prompts and this key will go to {hosts}; add it only if you trust the site that sent you here.", { hosts: hosts.join(", ") })));
-
-  const name = input(im.name ?? p.name, t("e.g. My Relay"));
-  name.oninput = () => { im.name = name.value; };
-  ed.append(...field(t("Name"), name));
-
-  const key = input(im.key ?? p.key ?? "", t(p.key ? "" : "paste an API key"), "password");
-  key.oninput = () => { im.key = key.value; };
-  key.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add(); else if (e.key === "Escape") cancelEdit(); };
-  const side = el("div", "side");
-  const eye = el("button", "text", t("Show"));
-  eye.onclick = () => { const on = key.type === "password"; key.type = on ? "text" : "password"; eye.textContent = t(on ? "Hide" : "Show"); };
-  side.append(eye);
-  if (p.keysUrl && !p.key) { const b = el("button", "link", t("Get a key ↗")); b.onclick = () => api("open", { url: p.keysUrl }); side.append(b); }
-  const keyWrap = el("div", "pair");
-  keyWrap.append(key, side);
-  ed.append(...field(t("API key"), keyWrap, p.key ? t("From the link. Kept in ~/.config/magpie/providers.json, readable by you alone.") : ""));
-
-  ed.append(...field(t("Endpoints"), renderEndpoints(null, p), ""));
-  if (p.models?.length) {
-    const chips = el("div", "mchips");
-    for (const m of p.models) chips.append(el("span", "mchip on", m));
-    ed.append(...field(t("Models"), chips, ""));
-  }
-  if (im.replaces) ed.append(el("div", "warnbox soft", t("Replaces your {name}, key and all.", { name: im.replaces })));
-
-  // The link may name the vendor's own logo — an explicit icon= wins over
-  // whatever the catalog or preset gave. magpie fetches it here (the dialog
-  // being open is the confirmation), once, quietly, and only ever into its
-  // icons folder; the fallback mark stays when it fails.
-  if (p.iconUrl) fetchImportIcon(p, h, ed);
-
-  const addBtn = el("button", "text primary", t(im.replaces ? "Replace" : "Add"));
-  const add = () => {
-    const n = (im.name ?? p.name).trim();
-    if (!n) { name.focus(); return status(t("Give it a name"), "warn"); }
-    addBtn.classList.add("busy");
-    providerAction("save", { ...p, name: n, key: (im.key ?? p.key ?? "").trim() }, t("{name} added", { name: n }));
-  };
-  addBtn.onclick = add;
-  bar.append(addBtn);
-  ed.append(bar);
-  setTimeout(() => (p.key ? addBtn : key).focus(), 0);
-  return ed;
 }
 
 // Which of the vendor's models the agents get to see: click to toggle, type
@@ -3488,7 +3197,6 @@ async function providerAction(action, body, okMsg, base = "provider/") {
     providers = await api(base + action, body);
     editing = null;
     draft = null;
-    importing = null;
     adding = false;
     presetQuery = "";
     renderProviders();
@@ -3555,7 +3263,6 @@ let quotas = null;
 let quotasAt = 0; // when they came in
 async function loadUsage() {
   renderUsageTab();
-  if (usageTab === "sessions") return loadSessions();
   renderUsageLoading();
   loadQuotas();
   usage = await api("usage?period=" + period);
@@ -4125,30 +3832,8 @@ function renderUsage() {
   $("#usageNote").textContent = t("Counted from the providers' own usage reports on every call through the gateway · {path}", { path: u.path });
 }
 
-// ---------- sessions ----------
-//
-// The agents' own sessions, read from their session files: what each cost,
-// and the command that picks it up again. A segment of the Usage page.
-
 const USAGE_TABS = [["usage", "Overview"]];
 let usageTab = "usage";
-let sessions = null; // { sessions, terminal, dirs }
-let sessAgent = "all";
-let sessQuery = "";
-// The totals and the chart are every session's, by day, over a range; the
-// list is the latest sessions within it. [id, name, days (0: all)]
-const SESS_RANGES = [["today", "Today", 1], ["7d", "7 days", 7], ["30d", "30 days", 30], ["90d", "90 days", 90], ["all", "All", 0]];
-let sessRange = "30d";
-let sessMetric = "tokens"; // what the chart's bars are: tokens or cost
-try {
-  const r = localStorage.getItem("magpie.sessRange");
-  if (SESS_RANGES.some(([id]) => id === r)) sessRange = r;
-  if (localStorage.getItem("magpie.sessMetric") === "cost") sessMetric = "cost";
-} catch {}
-let sessStats = null; // { from, to, days: [{ date, usage, active }], agents } for sessRange
-let sessModel = ""; // "" for every model
-let sessFolder = ""; // "" for every folder
-const sessOpen = new Set(); // agent:id of the sessions opened to their details
 
 function renderUsageTab() {
   const seg = $("#usageTab");
@@ -4164,375 +3849,8 @@ function renderUsageTab() {
     seg.append(b);
   }
   slide(seg, "usageTab");
-  const on = usageTab === "sessions";
-  $("#period").hidden = on;
-  $("#sessRange").hidden = !on;
-  $("#usagePane").hidden = on;
-  $("#sessionsPane").hidden = !on;
 }
 
-const sessDays = () => SESS_RANGES.find(([id]) => id === sessRange)[2];
-async function loadSessions() {
-  if (!sessions || !sessStats) renderSessionsLoading();
-  const range = sessRange;
-  const [s, st] = await Promise.all([api("sessions"), api("sessions/stats?days=" + sessDays())]);
-  if (range !== sessRange) return; // another range was picked meanwhile; its load draws
-  if (sessions && sessStats && JSON.stringify(s) === JSON.stringify(sessions) && JSON.stringify(st) === JSON.stringify(sessStats)) return;
-  sessions = s;
-  sessStats = st;
-  if (view === "usage" && usageTab === "sessions") renderSessions();
-}
-
-function renderSessionsLoading() {
-  const view = $("#view-usage");
-  view.classList.add("loading");
-  view.setAttribute("aria-busy", "true");
-  renderSessRange(true);
-  $("#sessAgent").replaceChildren();
-  $("#sessModel").hidden = $("#sessFolder").hidden = true;
-  $("#sessChart").hidden = true;
-  const stats = $("#sessStats");
-  stats.classList.remove("empty");
-  stats.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    const tile = el("div", "kpi loading-kpi");
-    tile.append(el("span", "skeleton sk-number"), el("span", "skeleton sk-label"));
-    stats.append(tile);
-  }
-  const list = $("#sessList");
-  list.hidden = false;
-  list.replaceChildren();
-  for (let i = 0; i < 4; i++) {
-    const r = el("div", "row sess-sk");
-    r.append(el("span", "skeleton sk-title"), el("span", "skeleton sk-line short"));
-    list.append(r);
-  }
-  $("#sessNote").textContent = t("Reading the agents' session files…");
-}
-
-const sessKey = (s) => s.agent + ":" + s.id;
-const sessTokens = (s) => s.input + s.output;
-// a session's cost: "—" when none of its models has a known price
-function sessCost(s) {
-  if (!s.models.some((m) => m.priced && (m.input || m.output || m.cache_read || m.cache_write))) return "—";
-  return "≈" + fmtCost({ cost: s.cost, unpriced: s.unpriced });
-}
-function ago(when) {
-  const sec = (new Date(when) - Date.now()) / 1000;
-  const rtf = new Intl.RelativeTimeFormat(locale === "zh" ? "zh-CN" : "en", { numeric: "auto" });
-  for (const [unit, n] of [["year", 31536000], ["month", 2592000], ["week", 604800], ["day", 86400], ["hour", 3600], ["minute", 60]]) {
-    if (Math.abs(sec) >= n) return rtf.format(Math.round(sec / n), unit);
-  }
-  return t("just now");
-}
-function stamp(when) {
-  return new Date(when).toLocaleString(locale === "zh" ? "zh-CN" : undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-const baseName = (p) => (p || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
-
-// the range picker, in the page's head where the Overview's period is
-function renderSessRange(loading) {
-  const seg = $("#sessRange");
-  seg.replaceChildren();
-  for (const [id, name] of SESS_RANGES) {
-    const b = el("button", "opt" + (id === sessRange ? " on" : ""), t(name));
-    b.disabled = !!loading;
-    b.onclick = () => {
-      if (id === sessRange) return;
-      sessRange = id;
-      try { localStorage.setItem("magpie.sessRange", id); } catch {}
-      sessStats = null;
-      loadSessions().catch((e) => status(e.message, "err"));
-    };
-    seg.append(b);
-  }
-  slide(seg, "sessRange");
-}
-
-// a "YYYY-MM-DD" as a local date, and back
-const sessDate = (d) => { const [y, m, day] = d.split("-").map(Number); return new Date(y, m - 1, day); };
-const sessISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const sessDay = (d) => d.toLocaleDateString(locale === "zh" ? "zh-CN" : "en", { month: "short", day: "numeric" });
-// a length of time, as hours and minutes
-function fmtDur(sec) {
-  const m = Math.round(sec / 60);
-  if (!sec) return "0";
-  if (m < 1) return t("<1m");
-  if (m < 60) return t("{m}m", { m });
-  return t("{h}h {m}m", { h: Math.floor(m / 60), m: m % 60 });
-}
-
-// sessPick is a filter button that drops a menu of what there is to pick
-function sessPick(btn, all, value, opts, head, choose) {
-  btn.hidden = opts.length < 2 && !value;
-  const cur = opts.find((o) => o.v === value);
-  btn.classList.toggle("set", !!value);
-  btn.replaceChildren(el("span", "", value ? (cur?.name || value) : t(all)), svg(CHEV, 11, 1.6));
-  btn.title = value || "";
-  btn.onclick = (e) => {
-    e.stopPropagation();
-    if (btn.classList.contains("open")) return closeProtoMenu();
-    openProtoMenu(btn, [{ v: "", name: all, note: "" }, ...opts], value, choose, head, "sess-menu");
-  };
-}
-
-function renderSessions() {
-  const view = $("#view-usage");
-  view.classList.remove("loading");
-  view.removeAttribute("aria-busy");
-  renderSessRange();
-  const all = sessions?.sessions || [];
-  const st = sessStats || { from: "", to: "", days: [], agents: {} };
-  const rows = st.days.flatMap((d) => d.usage.map((u) => ({ ...u, date: d.date })));
-  const acts = st.days.flatMap((d) => d.active.map((a) => ({ ...a, date: d.date })));
-
-  // one segment per agent that has sessions, or usage in the range
-  const agents = [...new Map([...all.map((s) => [s.agent, s.name]), ...Object.entries(st.agents || {})]).entries()];
-  if (sessAgent !== "all" && !agents.some(([id]) => id === sessAgent)) sessAgent = "all";
-  const seg = $("#sessAgent");
-  seg.replaceChildren();
-  seg.hidden = agents.length < 2;
-  for (const [id, name] of [["all", t("All")], ...agents]) {
-    const b = el("button", "opt" + (id === sessAgent ? " on" : ""), name);
-    b.onclick = () => { sessAgent = id; renderSessions(); };
-    seg.append(b);
-  }
-  slide(seg, "sessAgent");
-
-  // the model and folder filters offer what the range has, under the other filters
-  const byAgent = (x) => sessAgent === "all" || x.agent === sessAgent;
-  const byModel = (x) => !sessModel || x.model === sessModel;
-  const byFolder = (x) => !sessFolder || x.cwd === sessFolder;
-  const spent = (list, key) => {
-    const m = new Map();
-    for (const r of list) if (r[key]) m.set(r[key], (m.get(r[key]) || 0) + r.input + r.output);
-    return [...m.entries()].sort((a, b) => b[1] - a[1]);
-  };
-  const models = spent(rows.filter((r) => byAgent(r) && byFolder(r)), "model").map(([v, n]) => ({ v, name: v, note: t("{n} tokens", { n: fmtN(n) }) }));
-  const folders = spent(rows.filter((r) => byAgent(r) && byModel(r)), "cwd").map(([v, n]) => ({ v, name: baseName(v), note: v + " · " + t("{n} tokens", { n: fmtN(n) }) }));
-  sessPick($("#sessModel"), "All models", sessModel, models, "Model", (v) => { sessModel = v; renderSessions(); });
-  sessPick($("#sessFolder"), "All folders", sessFolder, folders, "Folder", (v) => { sessFolder = v; renderSessions(); });
-
-  // the list: the latest sessions active in the range, under every filter
-  const from = sessDays() && st.from ? sessDate(st.from) : null;
-  const q = sessQuery.trim().toLowerCase();
-  const list = all.filter((s) => byAgent(s) && (!sessFolder || s.cwd === sessFolder) &&
-    (!sessModel || s.models.some((m) => m.model === sessModel)) && (!from || new Date(s.last) >= from) &&
-    (!q || [s.title, s.cwd, s.id, s.name, ...s.models.map((m) => m.model)].some((x) => (x || "").toLowerCase().includes(q))));
-
-  // the range's totals, of every session under the filters
-  const used = rows.filter((r) => byAgent(r) && byModel(r) && byFolder(r));
-  const tot = { input: 0, output: 0, cache_read: 0, cache_write: 0, cost: 0, unpriced: 0 };
-  const unpriced = new Set();
-  for (const r of used) {
-    for (const k of ["input", "output", "cache_read", "cache_write", "cost"]) tot[k] += r[k];
-    if (!r.priced) unpriced.add(r.model);
-  }
-  tot.unpriced = unpriced.size;
-  // active time isn't told apart by model
-  const active = sessModel ? null : acts.filter((a) => byAgent(a) && byFolder(a)).reduce((n, a) => n + a.seconds, 0);
-
-  const c = tot.cost ? fmtCost(tot) : "";
-  const unpricedNote = tot.unpriced ? t("Not counted: {models}, with no known price", { models: [...unpriced].join(", ") }) : t("At each model's list price on models.dev");
-
-  const stats = $("#sessStats");
-  stats.replaceChildren();
-  const box = $("#sessList");
-  box.replaceChildren();
-  const chart = $("#sessChart");
-  if (!used.length && !list.length) {
-    stats.classList.add("empty");
-    const filtered = sessAgent !== "all" || sessModel || sessFolder || q;
-    stats.append(el("div", "none", !all.length && !rows.length ? t("No sessions yet. Claude Code's and Codex's sessions on this computer show up here, with what each cost and the command that resumes it.") : filtered ? t("No session matches.") : t("Nothing in this range.")));
-    box.hidden = true;
-    chart.hidden = true;
-  } else {
-    stats.classList.remove("empty");
-    const tile = (n, label, sub, title) => {
-      const e = el("div", "kpi");
-      if (title) e.title = title;
-      e.append(el("b", "", n), el("span", "", label));
-      if (sub) e.append(el("small", "", sub));
-      stats.append(e);
-    };
-    const days = new Set(used.map((r) => r.date)).size;
-    tile(c ? "≈" + c : "—", t("cost"), t("at list price"), unpricedNote);
-    tile(fmtN(tot.input + tot.output), t("tokens"), t("{a} in · {b} out", { a: fmtN(tot.input), b: fmtN(tot.output) }));
-    const prompt = tot.input + tot.cache_read;
-    tile(fmtN(tot.cache_read), t("cache read"), tot.cache_read && prompt ? t("hit rate {p}", { p: Math.round(100 * tot.cache_read / prompt) + "%" }) : "", tot.cache_write ? t("{n} written", { n: fmtN(tot.cache_write) }) : "");
-    tile(active == null ? "—" : fmtDur(active), t("active"), active == null ? t("not kept by model") : t(days === 1 ? "on {n} day" : "on {n} days", { n: days }),
-      t("The time the sessions were at work: the pauses between one message and the next, each under five minutes"));
-    renderSessChart(chart, st, used);
-    box.hidden = !list.length;
-    for (const s of list) box.append(sessionItem(s));
-  }
-  const dirs = (sessions?.dirs || []).join(" · ");
-  $("#sessNote").textContent = t("Totals count every session in the agents' own files; the list is the latest {n} by activity · {dirs}", { n: all.length, dirs });
-}
-
-// renderSessChart draws the range day by day (week by week past 92 days):
-// tokens, output on top of input as on the Overview, or cost.
-function renderSessChart(chart, st, used) {
-  const first = sessDate(st.from), last = sessDate(st.to);
-  const n = Math.round((last - first) / 864e5) + 1;
-  chart.hidden = n < 2;
-  if (chart.hidden) return;
-  const step = n > 92 ? 7 : 1;
-  const buckets = [];
-  const at = new Map();
-  for (let d = new Date(first); d <= last; d.setDate(d.getDate() + step)) {
-    const b = { day: new Date(d), input: 0, output: 0, cost: 0, unpriced: 0 };
-    for (let i = 0; i < step; i++) { const x = new Date(d); x.setDate(x.getDate() + i); at.set(sessISO(x), b); }
-    buckets.push(b);
-  }
-  for (const r of used) {
-    const b = at.get(r.date);
-    if (!b) continue;
-    b.input += r.input; b.output += r.output; b.cost += r.cost;
-    if (!r.priced) b.unpriced++;
-  }
-  const byCost = sessMetric === "cost";
-  const value = (b) => byCost ? b.cost : b.input + b.output;
-  const peak = Math.max(byCost ? 0.001 : 1, ...buckets.map(value));
-
-  chart.replaceChildren();
-  const head = el("div", "sess-chart-head");
-  const seg = el("div", "segs");
-  for (const [id, name] of [["tokens", "Tokens"], ["cost", "Cost"]]) {
-    const b = el("button", "opt" + (id === sessMetric ? " on" : ""), t(name));
-    b.onclick = () => {
-      if (id === sessMetric) return;
-      sessMetric = id;
-      try { localStorage.setItem("magpie.sessMetric", id); } catch {}
-      renderSessChart(chart, st, used);
-    };
-    seg.append(b);
-  }
-  head.append(el("span", "label", t(step === 7 ? "By week" : "By day")), seg, el("span", "grow"),
-    el("span", "peak", byCost ? "≈" + fmtCost({ cost: peak }) : fmtN(peak)));
-  const bars = el("div", "bars");
-  const labels = el("div", "labels");
-  const k = buckets.length;
-  const every = k <= 8 ? 1 : k <= 31 ? Math.ceil(k / 6) : Math.ceil(k / 5);
-  buckets.forEach((b, i) => {
-    const bar = el("div", "bar");
-    if (byCost) {
-      const c = el("i", "out");
-      c.style.height = (100 * b.cost / peak).toFixed(1) + "%";
-      bar.append(c);
-    } else {
-      const inp = el("i", "in"), out = el("i", "out");
-      inp.style.height = (100 * b.input / peak).toFixed(1) + "%";
-      out.style.height = (100 * b.output / peak).toFixed(1) + "%";
-      bar.append(out, inp);
-    }
-    const label = sessDay(b.day);
-    const when = step === 7 ? t("week of {label}", { label }) : label;
-    bar.title = b.input + b.output ? t("{when} · {tokens} tokens", { when, tokens: fmtN(b.input + b.output) }) + (fmtCost(b) ? " · ≈" + fmtCost(b) : "") : t("{when} · nothing", { when });
-    bars.append(bar);
-    const end = i === k - 1 && (k - 1) % every >= every / 2;
-    labels.append(el("span", "", i % every === 0 || end ? label : ""));
-  });
-  chart.append(head, bars, labels);
-  slide(seg, "sessMetric");
-}
-
-function sessionItem(s) {
-  const key = sessKey(s);
-  const item = el("div", "sess-item" + (sessOpen.has(key) ? " open" : ""));
-  const r = el("div", "row sess");
-  r.append(icon(s.icon || "generic"));
-  const who = el("div", "who");
-  who.append(el("div", "name", s.title || t("(no prompt)")));
-  // where magpie's gateway sent its calls, the most first: a routing
-  // group's member and the reasoning it was asked for
-  const via = s.via?.length ? "→ " + [s.via[0].model, s.via[0].effort].filter(Boolean).join(" · ") + (s.via.length > 1 ? " +" + (s.via.length - 1) : "") : "";
-  const sub = el("div", "sub", [s.cwd ? baseName(s.cwd) : "", s.models.slice(0, 2).map((m) => m.model).join(", ") + (s.models.length > 2 ? " +" + (s.models.length - 2) : "") + (via ? " " + via : ""), ago(s.last)].filter(Boolean).join(" · "));
-  sub.title = [s.cwd, ...(s.via || []).map(viaText)].filter(Boolean).join("\n");
-  who.append(sub);
-  r.append(who);
-  const num = el("div", "num");
-  num.append(el("b", "", fmtN(sessTokens(s))), el("small", "", t("{a} in · {b} out", { a: fmtN(s.input), b: fmtN(s.output) }) + (s.cache_read ? " · " + t("{n} cached", { n: fmtN(s.cache_read) }) : "")));
-  r.append(num);
-  const sc = sessCost(s);
-  const cost = el("div", "cost" + (sc === "—" ? " none" : ""), sc);
-  if (sc === "—") cost.title = t("No known price for {models}", { models: s.models.map((m) => m.model).join(", ") || "—" });
-  else if (s.unpriced) cost.title = t("Not counted: {models}, with no known price", { models: s.models.filter((m) => !m.priced).map((m) => m.model).join(", ") });
-  r.append(cost);
-  if (s.resume) {
-    const res = el("button", "sess-resume", t("Resume"));
-    res.title = t("Copy the command that resumes it: {cmd}", { cmd: s.resume });
-    res.onclick = async (ev) => {
-      ev.stopPropagation();
-      await copy(s.resume, t("Resume command"));
-      res.textContent = t("Copied");
-      res.classList.add("done");
-      clearTimeout(res.copiedT);
-      res.copiedT = setTimeout(() => { res.textContent = t("Resume"); res.classList.remove("done"); }, 1400);
-    };
-    r.append(res);
-    if (sessions?.terminal) {
-      const term = el("button", "copy sess-term");
-      term.title = t("Open in Terminal");
-      term.append(svg("M3 4.5 6 7.5 3 10.5M7.5 11.5h5.5", 13, 1.6));
-      term.onclick = (ev) => {
-        ev.stopPropagation();
-        api("sessions/terminal", { agent: s.agent, id: s.id }).then(() => status(t("Opened in Terminal"), "ok"), (e) => status(e.message, "err"));
-      };
-      r.append(term);
-    }
-  }
-  r.onclick = () => {
-    if (window.getSelection()?.toString()) return;
-    if (sessOpen.has(key)) sessOpen.delete(key); else sessOpen.add(key);
-    item.replaceWith(sessionItem(s));
-  };
-  item.append(r);
-  if (sessOpen.has(key)) item.append(sessionDetail(s));
-  return item;
-}
-
-function sessionDetail(s) {
-  const d = el("div", "sess-detail");
-  const line = (label, value, extra) => {
-    const l = el("div", "sess-line");
-    l.append(el("span", "k", label));
-    const v = el("span", "v", value);
-    l.append(v);
-    if (extra) l.append(extra);
-    d.append(l);
-  };
-  line(t("When"), stamp(s.start) + " – " + stamp(s.last));
-  if (s.cwd) line(t("Folder"), s.cwd);
-  line(t("Session"), s.id, copyBtn(s.id, t("Session id")));
-  if (s.resume) {
-    const code = el("code", "", s.resume);
-    const l = el("div", "sess-line");
-    l.append(el("span", "k", t("Resume")), code, copyBtn(s.resume, t("Resume command")));
-    d.append(l);
-  }
-  if (s.models.length) {
-    const m = el("div", "sess-models");
-    for (const x of s.models) {
-      m.append(el("span", "model", x.model),
-        el("span", "n", t("{a} in · {b} out", { a: fmtN(x.input), b: fmtN(x.output) }) + (x.cache_read ? " · " + t("{n} cached", { n: fmtN(x.cache_read) }) : "") + (x.cache_write ? " · " + t("{n} written", { n: fmtN(x.cache_write) }) : "")),
-        el("span", "c" + (x.priced ? "" : " none"), x.priced ? "≈" + fmtCost({ cost: x.cost }) : "—"));
-    }
-    d.append(m);
-  }
-  // what the gateway sent the session's calls to, at what reasoning
-  (s.via || []).forEach((v, i) => line(i ? "" : t("Routed"), viaText(v) + " · " + t("{n} tokens", { n: fmtN(v.tokens) })));
-  line(t("File"), s.path);
-  return d;
-}
-
-// one place a session's calls went through magpie, in words
-function viaText(v) {
-  return `${v.provider}/${v.model}` + (v.effort ? " · " + v.effort : "") + " · " + t("{n} calls", { n: v.calls });
-}
-
-$("#sessQ").oninput = (e) => { sessQuery = e.target.value; if (sessions) renderSessions(); };
-$("#sessQ").onkeydown = (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; sessQuery = ""; if (sessions) renderSessions(); } };
 
 // ---------- settings ----------
 //
@@ -4935,11 +4253,6 @@ setInterval(async () => {
 let usageTicks = 0;
 setInterval(async () => {
   if (view !== "usage" || document.hidden || document.querySelector(".pop:not([hidden])")) return;
-  if (usageTab === "sessions") {
-    // the agents write their session files as they go
-    if (++usageTicks % 3 === 0 && sessions) loadSessions().catch(() => {});
-    return;
-  }
   if (!usage) return;
   if (++usageTicks % 12 === 0) loadQuotas();
   const p = period;
@@ -5035,18 +4348,6 @@ setInterval(renderUpdateBadge, 15 * 60 * 1000); // a window left open still hear
   }
   setMasked(masked);
 })();
-
-// Opened on a magpie://import link: fetch what it describes (once — the
-// id is spent) and ask before adding it.
-if (mode === "window" && params.get("import")) {
-  const id = params.get("import");
-  params.delete("import");
-  history.replaceState(null, "", "?" + params);
-  api("import/" + encodeURIComponent(id)).then((im) => {
-    importing = im;
-    if (providers && view === "providers") renderProviders();
-  }).catch(() => {});
-}
 if (mode === "window" && params.get("view") === "providers" && params.get("edit")) editing = params.get("edit");
 if (mode === "window" && ["providers", "gateway", "models", "usage", "settings"].includes(params.get("view"))) show(params.get("view"));
 else if (mode === "window") slide($("#nav"), "nav");

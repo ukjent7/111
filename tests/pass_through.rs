@@ -77,26 +77,16 @@ async fn run_checks() -> Vec<Check> {
     let gateway_addr = free_port();
     let config = std::env::temp_dir().join(format!("magpie-e2e-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&config);
-    // a home of the suite's own, so the sessions scan and the import sources
-    // read what the suite planted there, not the runner's real ones
-    let home = std::env::temp_dir().join(format!("magpie-e2e-home-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
-    plant_sessions(&home);
-    plant_cc_switch(&home, &mock_addr.to_string());
     let mock = mock_addr.to_string();
     let guard = spawn_gateway(
         gateway_addr,
         mock_addr,
         &config,
         true,
-        &[
-            ("HOME", home.to_string_lossy().as_ref()),
-            (
-                "MAGPIE_UPDATE_URL",
-                format!("http://{mock}/release.json").as_str(),
-            ),
-        ],
+        &[(
+            "MAGPIE_UPDATE_URL",
+            format!("http://{mock}/release.json").as_str(),
+        )],
     );
     let gateway = format!("http://{gateway_addr}");
     let client = reqwest::Client::new();
@@ -114,8 +104,6 @@ async fn run_checks() -> Vec<Check> {
     checks.extend(gemini_scenario(&client, &gateway, &mock, &captured).await);
     checks.extend(editor_scenario(&client, &gateway, &mock).await);
     checks.extend(icons_scenario(&client, &gateway, &mock).await);
-    checks.extend(import_scenario(&client, &gateway, &captured).await);
-    checks.extend(sessions_scenario(&client, &gateway).await);
     checks.extend(wiring_scenario(&client, &gateway).await);
     checks.extend(update_scenario(&client, &gateway, &config).await);
     drop(guard); // keep the child alive until every check ran
@@ -927,62 +915,6 @@ fn asset_bytes() -> Vec<u8> {
         .clone()
 }
 
-/// Claude Code's and Codex's session files, as the gateway's scanner reads
-/// them: one of each, with known token counts to assert against — stamped
-/// with today's date, so the sessions are always in the ranges the tests read
-fn plant_sessions(home: &Path) {
-    let now = jiff::Timestamp::now();
-    let ago = |secs: i64| (now - jiff::Span::new().seconds(secs)).to_string();
-    let day = jiff::Zoned::now().date();
-    let (y, m, d) = (day.year(), day.month(), day.day());
-
-    let dir = home.join(".claude/projects/proj");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("abc.jsonl"),
-        format!(
-            concat!(
-                r#"{{"type":"user","timestamp":"{ts1}","cwd":"/tmp/proj","message":{{"content":"Fix the login bug"}}}}"#, "\n",
-                r#"{{"type":"assistant","timestamp":"{ts2}","cwd":"/tmp/proj","message":{{"model":"claude-x","usage":{{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":30,"cache_creation_input_tokens":5}}}}}}"#, "\n",
-            ),
-            ts1 = ago(40),
-            ts2 = ago(20),
-        ),
-    )
-    .unwrap();
-    let dir = home.join(format!(".codex/sessions/{y}/{m:02}/{d:02}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("rollout-def.jsonl"),
-        format!(
-            concat!(
-                r#"{{"timestamp":"{ts1}","type":"session_meta","payload":{{"id":"sess-def","cwd":"/tmp/code"}}}}"#, "\n",
-                r#"{{"timestamp":"{ts2}","type":"turn_context","payload":{{"model":"gpt-x"}}}}"#, "\n",
-                r#"{{"timestamp":"{ts3}","type":"event_msg","payload":{{"type":"user_message","message":"write the parser"}}}}"#, "\n",
-                r#"{{"timestamp":"{ts4}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":200,"output_tokens":20,"cached_input_tokens":40}}}}}}}}"#, "\n",
-            ),
-            ts1 = ago(120),
-            ts2 = ago(115),
-            ts3 = ago(114),
-            ts4 = ago(110),
-        ),
-    )
-    .unwrap();
-}
-
-/// a CC Switch config with one provider, for the Import dialog
-fn plant_cc_switch(home: &Path, mock_addr: &str) {
-    let dir = home.join(".cc-switch");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("config.json"),
-        format!(
-            r#"{{"claude":{{"providers":{{"p1":{{"name":"Relay One","settingsConfig":{{"env":{{"ANTHROPIC_BASE_URL":"http://{mock_addr}/anthropic","ANTHROPIC_AUTH_TOKEN":"sk-cc-1234"}}}}}}}}}}}}"#
-        ),
-    )
-    .unwrap();
-}
-
 /// Gemini on the wire: the path decides the protocol, the key swaps into
 /// Google's header (or its query parameter), and the version prefix of the
 /// base URL and the path are counted once.
@@ -1201,8 +1133,8 @@ async fn editor_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &st
     ]
 }
 
-/// A custom provider's own picture: uploaded, fetched from the site, or from
-/// a link — each served back from /api/icons.
+/// A custom provider's own picture: uploaded, or fetched from the site —
+/// each served back from /api/icons.
 async fn icons_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str) -> Vec<Check> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(PNG_BYTES);
     let uploaded = get_json_raw(
@@ -1225,25 +1157,10 @@ async fn icons_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str
             .unwrap(),
     )
     .await;
-    let from_link = get_json_raw(
-        client
-            .post(format!("{gateway}/api/import/icon"))
-            .header("content-type", "application/json")
-            .body(
-                serde_json::json!({ "url": format!("http://{mock_addr}/import-icon.png") })
-                    .to_string(),
-            )
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-
     let mut checks = Vec::new();
     for (what, answer) in [
         ("an uploaded picture", &uploaded),
         ("the site's own icon", &from_site),
-        ("a picture from a link", &from_link),
     ] {
         let icon = answer["icon"].as_str().unwrap_or_default().to_owned();
         let served = client
@@ -1278,171 +1195,6 @@ async fn icons_scenario(client: &reqwest::Client, gateway: &str, mock_addr: &str
         ));
     }
     checks
-}
-
-/// Providers set up in CC Switch come over: listed with the key masked, and
-/// the imported one actually routes with the real key.
-async fn import_scenario(client: &reqwest::Client, gateway: &str, captured: &Shared) -> Vec<Check> {
-    let sources = get_json_raw(
-        client
-            .get(format!("{gateway}/api/importapps"))
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-    let run = get_json_raw(
-        client
-            .post(format!("{gateway}/api/importapps"))
-            .header("content-type", "application/json")
-            .body(
-                serde_json::json!({ "picks": [{ "source": "cc-switch", "ref": "p1" }] })
-                    .to_string(),
-            )
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-
-    client
-        .post(format!("{gateway}/v1/messages"))
-        .header("content-type", "application/json")
-        .body(r#"{"model":"claude-x","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"#)
-        .send()
-        .await
-        .unwrap();
-    let c = captured.lock().unwrap().clone();
-
-    // cleanup: the imported provider leaves again
-    let id = run["state"]["providers"]
-        .as_array()
-        .and_then(|p| p.first())
-        .and_then(|p| p["id"].as_str())
-        .unwrap_or("relay-one")
-        .to_owned();
-    let _ = client
-        .post(format!("{gateway}/api/provider/delete"))
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "id": id }).to_string())
-        .send()
-        .await
-        .unwrap();
-
-    let item = sources
-        .as_array()
-        .and_then(|s| s.first())
-        .cloned()
-        .unwrap_or_default();
-    vec![
-        check(
-            "CC Switch's providers are offered with their key masked",
-            (item["found"] == serde_json::json!(true)
-                && item["items"].as_array().map(|i| i.len()) == Some(1)
-                && item["items"][0]["provider"]["key"]
-                    .as_str()
-                    .is_some_and(|k| k.contains("…") && k != "sk-cc-1234"))
-            .then(|| "one provider, key masked".into())
-            .ok_or_else(|| format!("sources: {sources}")),
-        ),
-        check(
-            "an imported provider lands in the config",
-            (run["added"].as_array().map(|a| a.len()) == Some(1))
-                .then(|| format!("imported {:?}", run["added"]))
-                .ok_or_else(|| format!("run: {run}")),
-        ),
-        check(
-            "the imported provider routes with the real key",
-            (c.path == "/anthropic/v1/messages"
-                && c.headers.get("x-api-key").and_then(|v| v.to_str().ok()) == Some("sk-cc-1234"))
-            .then(|| format!("{} {} with the imported key", c.method, c.path))
-            .ok_or_else(|| format!("captured {c:#?}")),
-        ),
-    ]
-}
-
-/// The sessions the agents wrote: listed with their tokens, summed per day,
-/// and priced against the catalog where it knows the model.
-async fn sessions_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
-    let list = get_json_raw(
-        client
-            .get(format!("{gateway}/api/sessions"))
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-    let stats = get_json_raw(
-        client
-            .get(format!("{gateway}/api/sessions/stats?days=30"))
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-
-    let sessions = list["sessions"].as_array().cloned().unwrap_or_default();
-    let claude = sessions.iter().find(|s| s["agent"] == "claude");
-    let codex = sessions.iter().find(|s| s["agent"] == "codex");
-    let days = stats["days"].as_array().cloned().unwrap_or_default();
-    let day_rows: Vec<&serde_json::Value> = days
-        .iter()
-        .flat_map(|d| d["usage"].as_array().unwrap())
-        .collect();
-    vec![
-        check(
-            "Claude Code's and Codex's sessions show up",
-            (claude
-                .map(|s| s["id"].as_str() == Some("abc"))
-                .unwrap_or(false)
-                && codex
-                    .map(|s| s["id"].as_str() == Some("sess-def"))
-                    .unwrap_or(false))
-            .then(|| "both agents' sessions listed".into())
-            .ok_or_else(|| format!("sessions: {list}")),
-        ),
-        check(
-            "a session's tokens come from its own file",
-            (claude
-                .map(|s| {
-                    s["input"] == serde_json::json!(100)
-                        && s["output"] == serde_json::json!(50)
-                        && s["cache_read"] == serde_json::json!(30)
-                        && s["cache_write"] == serde_json::json!(5)
-                })
-                .unwrap_or(false)
-                && codex
-                    .map(|s| {
-                        s["input"] == serde_json::json!(200) && s["output"] == serde_json::json!(20)
-                    })
-                    .unwrap_or(false))
-            .then(|| "claude 100/50 (+30/+5), codex 200/20".into())
-            .ok_or_else(|| format!("sessions: {list}")),
-        ),
-        check(
-            "a session carries the command that resumes it",
-            (claude
-                .map(|s| s["resume"].as_str() == Some("claude --resume abc"))
-                .unwrap_or(false)
-                && codex
-                    .map(|s| s["resume"].as_str() == Some("codex resume sess-def"))
-                    .unwrap_or(false))
-            .then(|| "resume commands along".into())
-            .ok_or_else(|| format!("sessions: {list}")),
-        ),
-        check(
-            "the range's totals are bucketed per day and agent",
-            (stats["agents"]["claude"].is_string()
-                && stats["agents"]["codex"].is_string()
-                && day_rows
-                    .iter()
-                    .filter(|r| r["agent"] == "claude" || r["agent"] == "codex")
-                    .count()
-                    >= 2)
-                .then(|| format!("{} day buckets, both agents present", days.len()))
-                .ok_or_else(|| format!("stats: {stats}")),
-        ),
-    ]
 }
 
 /// The shell's small plumbing: clipboard, window actions, update state.
@@ -1629,10 +1381,6 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
             ))
             .unwrap(),
         "/favicon.ico" => Response::builder()
-            .header("content-type", "image/png")
-            .body(Body::from(PNG_BYTES.to_vec()))
-            .unwrap(),
-        "/import-icon.png" => Response::builder()
             .header("content-type", "image/png")
             .body(Body::from(PNG_BYTES.to_vec()))
             .unwrap(),
