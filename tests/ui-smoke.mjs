@@ -38,7 +38,7 @@ const connected = (port) =>
 // on its feet reports why instead of timing out
 const startGateway = async (config, env = {}) => {
   const port = await freePort();
-  const proc = spawn(bin, ['--listen', `127.0.0.1:${port}`, '--config', config, '--no-window'], { env: { ...process.env, ...env } });
+  const proc = spawn(bin, [], { env: { ...process.env, MAGPIE_LISTEN: `127.0.0.1:${port}`, MAGPIE_CONFIG: config, MAGPIE_NO_WINDOW: '1', ...env } });
   let out = '';
   let err = '';
   let exit = '';
