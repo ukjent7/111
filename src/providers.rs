@@ -645,7 +645,11 @@ pub async fn reveal_key(State(app): State<Arc<App>>, Json(body): Json<Value>) ->
 pub async fn fetch_models_for_provider(app: &Arc<App>, id: &str) -> anyhow::Result<usize> {
     let (base, key, anthropic) = {
         let cfg = app.config.lock().await;
-        let p = cfg.providers.iter().find(|p| p.id == id).context("no such provider")?;
+        let p = cfg
+            .providers
+            .iter()
+            .find(|p| p.id == id)
+            .context("no such provider")?;
         let base = [p.models_url.as_str(), p.chat.as_str(), p.responses.as_str()]
             .into_iter()
             .find(|s| !s.is_empty())
