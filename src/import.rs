@@ -80,7 +80,7 @@ fn slug(s: &str) -> String {
 /// the provider entries a config carries, whatever its exact shape: a
 /// `providers` object keyed by id, or a list — the file may wrap its apps'
 /// sections (`{"claude": …}`) one level down, so those are looked in too
-fn entries<'a>(config: &'a Value) -> Vec<(String, &'a Value)> {
+fn entries(config: &Value) -> Vec<(String, &Value)> {
     fn scan<'a>(v: &'a Value, out: &mut Vec<(String, &'a Value)>) {
         let Some(p) = v.get("providers") else {
             return;

@@ -145,7 +145,7 @@ impl Store {
         let mut cost = 0.0f64;
         let mut unpriced: std::collections::BTreeSet<String> = Default::default();
         // model → (calls, errors, input, output, cache_read, cost, vendor icon)
-        let mut models: HashMap<String, (u64, u64, u64, u64, u64, f64, String)> = HashMap::new();
+        let mut models: HashMap<String, ModelRow> = HashMap::new();
         for r in records.iter().filter(|r| r.time >= start) {
             let price = price_of(catalog, &r.model);
             calls += 1;
@@ -167,17 +167,17 @@ impl Store {
             if !r.model.is_empty() {
                 let icon = price.as_ref().map(|(_, vendor)| format!("file:{vendor}"));
                 let m = models.entry(r.model.clone()).or_default();
-                *m = (
-                    m.0 + 1,
-                    m.1 + u64::from(r.status >= 400),
-                    m.2 + r.input,
-                    m.3 + r.output,
-                    m.4 + r.cache_read,
-                    m.5 + price.as_ref().map_or(0.0, |(p, _)| {
+                *m = ModelRow {
+                    calls: m.calls + 1,
+                    errors: m.errors + u64::from(r.status >= 400),
+                    input: m.input + r.input,
+                    output: m.output + r.output,
+                    cache_read: m.cache_read + r.cache_read,
+                    cost: m.cost + price.as_ref().map_or(0.0, |(p, _)| {
                         p.at(r.input, r.output, r.cache_read, r.cache_write)
                     }),
-                    icon.unwrap_or_else(|| m.6.clone()),
-                );
+                    icon: icon.unwrap_or_else(|| m.icon.clone()),
+                };
             }
             if let Some(slot) = index.get(label(r.time, bucket).as_str()) {
                 let b = &mut series[*slot];
@@ -197,8 +197,9 @@ impl Store {
 
         let mut rows: Vec<Value> = models
             .into_iter()
-            .map(|(name, (n, errs, i, o, cr, c, icon))| {
-                json!({ "name": name, "icon": icon, "calls": n, "errors": errs, "input": i, "output": o, "cache_read": cr, "cost": c })
+            .map(|(name, m)| {
+                json!({ "name": name, "icon": m.icon, "calls": m.calls, "errors": m.errors,
+                    "input": m.input, "output": m.output, "cache_read": m.cache_read, "cost": m.cost })
             })
             .collect();
         rows.sort_by(|a, b| {
@@ -228,6 +229,18 @@ impl Store {
             "path": path,
         })
     }
+}
+
+/// one model's totals over the window, as the Usage tab's model rows read them
+#[derive(Default)]
+struct ModelRow {
+    calls: u64,
+    errors: u64,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cost: f64,
+    icon: String,
 }
 
 /// A model's list price, per million tokens, as the models.dev catalog has it.
