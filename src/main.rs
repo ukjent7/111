@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
 mod providers;
+mod settings;
 
 // the prepared UI, embedded so the binary alone is the whole desktop app
 pub static UI: Dir<'_> = include_dir!("ui-source");
@@ -41,6 +42,8 @@ pub struct ConfigState {
     pub upstream: String,
     #[serde(default)]
     pub providers: Vec<providers::Provider>,
+    #[serde(default)]
+    pub settings: Value,
 }
 
 /// a vendor logo's bytes and content type, or its absence
@@ -163,6 +166,18 @@ fn main() -> Result<()> {
         .route("/api/provider/key", post(providers::reveal_key))
         .route("/api/provider/models", post(providers::fetch_models))
         .route("/api/provider/test", post(providers::test))
+        .route("/api/settings", get(settings::get).post(settings::save))
+        .route("/api/settings/quota-left", post(settings::set_quota_left))
+        .route("/api/settings/login", post(settings::set_login))
+        .route("/api/settings/lan", post(settings::set_lan))
+        .route("/api/settings/reveal", post(settings::reveal))
+        .route("/api/open", post(settings::open))
+        .route("/api/usage", get(settings::usage))
+        .route("/api/usage/quotas", get(settings::usage_quotas))
+        .route("/api/sessions", get(settings::sessions))
+        .route("/api/sessions/stats", get(settings::sessions_stats))
+        .route("/api/davsync", get(settings::davsync))
+        .route("/api/drift", get(settings::drift))
         .fallback(entry)
         .layer(DefaultBodyLimit::disable())
         .layer(middleware::from_fn(check_host))
@@ -425,8 +440,10 @@ pub fn shell_state() -> Response {
     Json(json!({ "agents": [], "profiles": [], "settings": {} })).into_response()
 }
 
-async fn api_state() -> impl IntoResponse {
-    shell_state()
+async fn api_state(State(app): State<Arc<App>>) -> impl IntoResponse {
+    let cfg = app.config.lock().await;
+    let s = settings::get_settings(&app, &cfg);
+    Json(json!({ "agents": [], "profiles": [], "settings": s }))
 }
 
 async fn api_trace(State(app): State<Arc<App>>, req: Request) -> impl IntoResponse {
