@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use axum::body::Body;
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -313,7 +313,7 @@ fn host_name(host: &str) -> String {
 async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     let started = Instant::now();
     let (mut parts, body) = req.into_parts();
-    let path = parts
+    let mut path = parts
         .uri
         .path_and_query()
         .map(|pq| pq.as_str().to_owned())
@@ -328,18 +328,85 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     parts.headers.remove(header::HOST);
     parts.headers.remove(header::CONTENT_LENGTH);
 
+    let body_bytes = if has_body {
+        to_bytes(body, usize::MAX).await.unwrap_or_default()
+    } else {
+        Bytes::new()
+    };
+
+    let cfg = app.config.lock().await;
+
+    // 1. Check if URL path starts with a provider prefix: /<provider>/...
+    let mut path_provider_hint: Option<String> = None;
+    let (path_only, query_part) = match path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path.as_str(), None),
+    };
+    let trimmed_path = path_only.trim_start_matches('/');
+    if let Some((first_seg, rest)) = trimmed_path.split_once('/') {
+        if let Some(p) = cfg.providers.iter().find(|p| {
+            p.id.eq_ignore_ascii_case(first_seg) || p.name.eq_ignore_ascii_case(first_seg)
+        }) {
+            path_provider_hint = Some(p.id.clone());
+            path = match query_part {
+                Some(q) => format!("/{rest}?{q}"),
+                None => format!("/{rest}"),
+            };
+        }
+    } else if let Some(p) = cfg.providers.iter().find(|p| {
+        p.id.eq_ignore_ascii_case(trimmed_path) || p.name.eq_ignore_ascii_case(trimmed_path)
+    }) {
+        path_provider_hint = Some(p.id.clone());
+        path = match query_part {
+            Some(q) => format!("/?{q}"),
+            None => "/".to_string(),
+        };
+    }
+
+    // 2. Check if JSON body specifies a provider prefix in "model": "<provider>/<model>" or "<provider>:<model>"
+    let mut model_name: Option<String> = None;
+    let mut model_provider_hint: Option<String> = None;
+    let mut forwarded_body = body_bytes;
+
+    if !forwarded_body.is_empty() {
+        if let Ok(mut json_val) = serde_json::from_slice::<Value>(&forwarded_body) {
+            if let Some(obj) = json_val.as_object_mut() {
+                if let Some(model_val) = obj.get("model").and_then(Value::as_str) {
+                    model_name = Some(model_val.to_owned());
+                    for sep in ['/', ':'] {
+                        if let Some((prefix, clean_model)) = model_val.split_once(sep) {
+                            if let Some(p) = cfg.providers.iter().find(|p| {
+                                p.id.eq_ignore_ascii_case(prefix) || p.name.eq_ignore_ascii_case(prefix)
+                            }) {
+                                model_provider_hint = Some(p.id.clone());
+                                obj.insert("model".to_owned(), json!(clean_model));
+                                if let Ok(new_bytes) = serde_json::to_vec(&json_val) {
+                                    forwarded_body = Bytes::from(new_bytes);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let provider_hint = model_provider_hint
+        .as_deref()
+        .or(path_provider_hint.as_deref());
+
     enum Dest {
         Provider(providers::Target),
         Legacy(String),
     }
-    let dest = {
-        let cfg = app.config.lock().await;
-        if cfg.providers.is_empty() {
-            (!cfg.upstream.is_empty()).then(|| Dest::Legacy(cfg.upstream.clone()))
-        } else {
-            providers::route_for(&cfg, &path).map(Dest::Provider)
-        }
+    let dest = if cfg.providers.is_empty() {
+        (!cfg.upstream.is_empty()).then(|| Dest::Legacy(cfg.upstream.clone()))
+    } else {
+        providers::route_for_with_provider(&cfg, provider_hint, &path).map(Dest::Provider)
     };
+    drop(cfg);
+
     let to = match dest {
         None => {
             let msg = "magpie: no provider configured yet — add one in the Providers tab, or pass --upstream <url> once";
@@ -373,9 +440,11 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
     };
 
     let mut sent = app.client.request(parts.method, &to).headers(parts.headers);
-    if has_body {
-        sent = sent.body(reqwest::Body::wrap_stream(body.into_data_stream()));
+    if !forwarded_body.is_empty() {
+        sent = sent.body(forwarded_body);
     }
+
+    let recorded_model = model_name.as_deref().unwrap_or("");
 
     let upstream_res = match sent.send().await {
         Ok(res) => res,
@@ -388,6 +457,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
                 StatusCode::BAD_GATEWAY,
                 started,
                 Some(err.to_string()),
+                recorded_model,
             );
             return (StatusCode::BAD_GATEWAY, format!("magpie: {err}")).into_response();
         }
@@ -402,7 +472,7 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
         .body(body)
         .expect("status and stream body are always valid");
     *res.headers_mut() = headers;
-    record(&app, &path, &to, status, started, None);
+    record(&app, &path, &to, status, started, None, recorded_model);
     tracing::info!(%method, %path, status = status.as_u16(), ms = started.elapsed().as_millis() as u64, "passed through");
     res
 }
@@ -414,6 +484,7 @@ fn record(
     status: StatusCode,
     started: Instant,
     error: Option<String>,
+    model: &str,
 ) {
     app.gateway.requests.fetch_add(1, Ordering::Relaxed);
     if status.is_client_error() || status.is_server_error() {
@@ -421,7 +492,7 @@ fn record(
     }
     let call = json!({
         "time": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
-        "model": "",
+        "model": model,
         "from": path,
         "to": to,
         "status": status.as_u16(),

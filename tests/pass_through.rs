@@ -203,6 +203,57 @@ async fn provider_scenario(
         .unwrap();
     let c = captured.lock().unwrap().clone();
 
+    // Register a second provider e2e-b that also provides the same model "alpha"
+    let save_b_body = serde_json::json!({
+        "id": "e2e-b", "new": true, "name": "E2E Vendor B", "api": "openai",
+        "chat": format!("http://{mock_addr}/b/v1"), "key": "sk-test-b",
+        "models": ["alpha"], "headers": { "x-provider": "b" },
+    });
+    let _ = post("/api/provider/save", save_b_body.to_string())
+        .await
+        .unwrap();
+
+    // 1. Explicit slash prefix in model name: "e2e-b/alpha"
+    let prefix_body = r#"{"model":"e2e-b/alpha","messages":[{"role":"user","content":"hi"}]}"#;
+    client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(prefix_body)
+        .send()
+        .await
+        .unwrap();
+    let c_prefix = captured.lock().unwrap().clone();
+
+    // 2. Explicit colon prefix in model name: "e2e-b:alpha"
+    let colon_body = r#"{"model":"e2e-b:alpha","messages":[{"role":"user","content":"hi"}]}"#;
+    client
+        .post(format!("{gateway}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(colon_body)
+        .send()
+        .await
+        .unwrap();
+    let c_colon = captured.lock().unwrap().clone();
+
+    // 3. Explicit path prefix: "/e2e-b/v1/chat/completions"
+    let path_body = r#"{"model":"alpha","messages":[{"role":"user","content":"hi"}]}"#;
+    client
+        .post(format!("{gateway}/e2e-b/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(path_body)
+        .send()
+        .await
+        .unwrap();
+    let c_path = captured.lock().unwrap().clone();
+
+    // Clean up e2e-b
+    let _ = post(
+        "/api/provider/delete",
+        serde_json::json!({"id": "e2e-b"}).to_string(),
+    )
+    .await
+    .unwrap();
+
     let fetched = get_json_raw(
         post(
             "/api/provider/models",
@@ -334,6 +385,36 @@ async fn provider_scenario(
                 && deleted["gateway"]["models"] == serde_json::json!(0))
             .then(|| "no providers left, no models served".into())
             .ok_or_else(|| format!("deleted: {deleted}")),
+        ),
+        check(
+            "explicit slash prefix in model routes to provider and strips prefix",
+            (c_prefix.path == "/b/v1/chat/completions"
+                && c_prefix.headers.get("x-provider").and_then(|v| v.to_str().ok()) == Some("b")
+                && serde_json::from_slice::<serde_json::Value>(&c_prefix.body)
+                    .map(|v| v["model"] == "alpha")
+                    .unwrap_or(false))
+            .then(|| "e2e-b/alpha forwarded as alpha to e2e-b".into())
+            .ok_or_else(|| format!("c_prefix: {c_prefix:#?}")),
+        ),
+        check(
+            "explicit colon prefix in model routes to provider and strips prefix",
+            (c_colon.path == "/b/v1/chat/completions"
+                && c_colon.headers.get("x-provider").and_then(|v| v.to_str().ok()) == Some("b")
+                && serde_json::from_slice::<serde_json::Value>(&c_colon.body)
+                    .map(|v| v["model"] == "alpha")
+                    .unwrap_or(false))
+            .then(|| "e2e-b:alpha forwarded as alpha to e2e-b".into())
+            .ok_or_else(|| format!("c_colon: {c_colon:#?}")),
+        ),
+        check(
+            "explicit path prefix routes to provider",
+            (c_path.path == "/b/v1/chat/completions"
+                && c_path.headers.get("x-provider").and_then(|v| v.to_str().ok()) == Some("b")
+                && serde_json::from_slice::<serde_json::Value>(&c_path.body)
+                    .map(|v| v["model"] == "alpha")
+                    .unwrap_or(false))
+            .then(|| "/e2e-b/v1/chat/completions routed to e2e-b".into())
+            .ok_or_else(|| format!("c_path: {c_path:#?}")),
         ),
         logo,
         embedded_logo,
@@ -683,7 +764,7 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
 
     // every mock answer is marked, so a check can prove a request never got here
     let mut res = match parts.uri.path() {
-        "/v1/chat/completions" => Response::builder()
+        p if p.ends_with("/chat/completions") => Response::builder()
             .header("content-type", "text/event-stream")
             .header("x-request-id", "upstream-42")
             .body(sse_body())

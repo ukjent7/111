@@ -817,10 +817,14 @@ pub struct Target {
     pub anthropic: bool,
 }
 
-/// The request path decides the protocol; the first provider that serves it
-/// wins. OpenAI-family base URLs carry their own `/v1`, so the prefix comes
-/// off; Anthropic's is the root, so the path stays.
-pub fn route_for(cfg: &ConfigState, path_and_query: &str) -> Option<Target> {
+/// The request path decides the protocol. If a `provider_hint` is provided,
+/// the matching provider (by id or name, case-insensitive) is preferred.
+/// Otherwise, the first provider that serves the protocol wins.
+pub fn route_for_with_provider(
+    cfg: &ConfigState,
+    provider_hint: Option<&str>,
+    path_and_query: &str,
+) -> Option<Target> {
     let (path, query) = match path_and_query.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (path_and_query, None),
@@ -839,8 +843,14 @@ pub fn route_for(cfg: &ConfigState, path_and_query: &str) -> Option<Target> {
         )
     };
     let sub = if sub.is_empty() { "/".to_owned() } else { sub };
-    cfg.providers.iter().find_map(|p| {
-        let base = p.url(api).trim_end_matches('/');
+
+    let to_target = |p: &Provider, allow_fallback: bool| -> Option<Target> {
+        let base = if allow_fallback {
+            p.url_set(api).unwrap_or_else(|| p.base_url())
+        } else {
+            p.url(api)
+        }
+        .trim_end_matches('/');
         if base.is_empty() {
             return None;
         }
@@ -855,5 +865,21 @@ pub fn route_for(cfg: &ConfigState, path_and_query: &str) -> Option<Target> {
             headers: p.headers.clone(),
             anthropic: api == Api::Anthropic,
         })
-    })
+    };
+
+    if let Some(hint) = provider_hint {
+        if let Some(p) = cfg.providers.iter().find(|p| {
+            p.id.eq_ignore_ascii_case(hint) || p.name.eq_ignore_ascii_case(hint)
+        }) {
+            if let Some(target) = to_target(p, true) {
+                return Some(target);
+            }
+        }
+    }
+
+    cfg.providers.iter().find_map(|p| to_target(p, false))
+}
+
+pub fn route_for(cfg: &ConfigState, path_and_query: &str) -> Option<Target> {
+    route_for_with_provider(cfg, None, path_and_query)
 }
