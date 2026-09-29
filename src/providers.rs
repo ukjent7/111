@@ -5,13 +5,14 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -27,7 +28,7 @@ pub async fn list(State(app): State<Arc<App>>) -> Response {
 /// The header's refresh button: ask models.dev again, so its vendor list and
 /// model names come back current.
 pub async fn sync(State(app): State<Arc<App>>) -> Response {
-    match fetch_catalog(&app.client).await {
+    match fetch_catalog(&app.client()).await {
         Ok(v) => {
             store_catalog(&app, v);
             shell_state()
@@ -93,7 +94,7 @@ pub async fn icon(
         return respond_logo(Some((bytes, mime)));
     }
 
-    let fetched = fetch_and_persist_logo(&app.client, &app.logos_dir, &id).await;
+    let fetched = fetch_and_persist_logo(&app.client(), &app.logos_dir, &id).await;
     app.logos.lock().unwrap().insert(id, fetched.clone());
     respond_logo(fetched)
 }
@@ -160,15 +161,136 @@ fn find_embedded_logo(id: &str) -> Option<(Vec<u8>, String)> {
 }
 
 fn find_disk_logo(logos_dir: &Path, id: &str) -> Option<(Vec<u8>, String)> {
-    let svg_path = logos_dir.join(format!("{id}.svg"));
-    if let Ok(bytes) = std::fs::read(&svg_path) {
-        return Some((bytes, "image/svg+xml".to_owned()));
-    }
-    let png_path = logos_dir.join(format!("{id}.png"));
-    if let Ok(bytes) = std::fs::read(&png_path) {
-        return Some((bytes, "image/png".to_owned()));
+    for (ext, mime) in LOGO_EXTS {
+        if let Ok(bytes) = std::fs::read(logos_dir.join(format!("{id}.{ext}"))) {
+            return Some((bytes, mime.to_owned()));
+        }
     }
     None
+}
+
+/// the file extensions a logo may live under, with their content types
+const LOGO_EXTS: [(&str, &str); 7] = [
+    ("svg", "image/svg+xml"),
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("webp", "image/webp"),
+    ("gif", "image/gif"),
+    ("ico", "image/x-icon"),
+];
+
+/// the extension of an image the gateway fetched or was given, read off its
+/// first bytes — a picture's content type is not to be trusted
+fn image_ext(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xFF, 0xD8, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'R', b'I', b'F', b'F', ..] if bytes.len() > 12 && &bytes[8..12] == b"WEBP" => Some("webp"),
+        [0x00, 0x00, 0x01, 0x00, ..] => Some("ico"),
+        _ if bytes.starts_with(b"<svg")
+            || bytes.starts_with(b"<?xml")
+            || bytes.starts_with(b"\xEF\xBB\xBF<") =>
+        {
+            Some("svg")
+        }
+        _ => None,
+    }
+}
+
+/// an id for a picture of the user's own: a time, so uploads never collide
+fn icon_id() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "c{:x}{n:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    )
+}
+
+fn store_logo(logos_dir: &Path, id: &str, ext: &str, bytes: &[u8]) {
+    let _ = std::fs::create_dir_all(logos_dir);
+    let _ = std::fs::write(logos_dir.join(format!("{id}.{ext}")), bytes);
+}
+
+/// A picture of the user's own, sent as base64 in JSON (the app's web view
+/// drops a File sent as the body).
+pub async fn upload_icon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let Some(data) = body["data"].as_str() else {
+        return err(StatusCode::BAD_REQUEST, "no picture given");
+    };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        return err(StatusCode::BAD_REQUEST, "that is not base64");
+    };
+    let Some(ext) = image_ext(&bytes) else {
+        return err(StatusCode::BAD_REQUEST, "that is not a picture magpie can show");
+    };
+    let id = icon_id();
+    store_logo(&app.logos_dir, &id, ext, &bytes);
+    Json(json!({ "icon": format!("file:{id}") })).into_response()
+}
+
+/// The icon of the site a base URL is on, for a custom provider.
+pub async fn favicon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let Some(url) = body["url"].as_str() else {
+        return err(StatusCode::BAD_REQUEST, "no URL given");
+    };
+    let Some(host) = reqwest::Url::parse(if url.contains("://") {
+        url
+    } else {
+        &format!("https://{url}")
+    })
+    .ok()
+    .and_then(|u| u.host_str().map(str::to_owned))
+    else {
+        return err(StatusCode::BAD_REQUEST, "that is not a URL");
+    };
+    // Google's favicon service has almost every site; the site's own
+    // /favicon.ico is there for when it has none
+    let urls = [
+        format!("https://www.google.com/s2/favicons?domain={host}&sz=64"),
+        format!("https://{host}/favicon.ico"),
+    ];
+    let client = app.client();
+    for url in urls {
+        let Ok(res) = client.get(&url).timeout(Duration::from_secs(5)).send().await
+            && res.status().is_success()
+            && let Ok(bytes) = res.bytes().await
+            && !bytes.is_empty()
+            && let Some(ext) = image_ext(&bytes)
+        {
+            let id = icon_id();
+            store_logo(&app.logos_dir, &id, ext, &bytes);
+            return Json(json!({ "icon": format!("file:{id}") })).into_response();
+        }
+    }
+    err(StatusCode::BAD_GATEWAY, "no icon found for that site")
+}
+
+/// A picture fetched from a link, as an import describes it. It lands in the
+/// icons folder and nowhere else.
+pub async fn import_icon(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let Some(url) = body["url"].as_str().map(str::trim) else {
+        return err(StatusCode::BAD_REQUEST, "no URL given");
+    };
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return err(StatusCode::BAD_REQUEST, "that is not a URL");
+    }
+    let client = app.client();
+    if let Ok(res) = client.get(url).timeout(Duration::from_secs(8)).send().await
+        && res.status().is_success()
+        && let Ok(bytes) = res.bytes().await
+        && let Some(ext) = image_ext(&bytes)
+    {
+        let id = icon_id();
+        store_logo(&app.logos_dir, &id, ext, &bytes);
+        return Json(json!({ "icon": format!("file:{id}") })).into_response();
+    }
+    err(StatusCode::BAD_GATEWAY, "couldn't fetch that picture")
 }
 
 async fn fetch_and_persist_logo(client: &reqwest::Client, logos_dir: &Path, id: &str) -> Logo {
@@ -241,7 +363,8 @@ pub fn payload(app: &App, cfg: &ConfigState) -> Value {
 }
 
 /// A stored provider, plus the derived bits the list row reads: display
-/// names come from the models.dev catalog when it knows the model.
+/// names, context windows and reasoning levels come from the models.dev
+/// catalog when it knows the model.
 fn enrich(p: &Provider, catalog: &Value) -> Value {
     let mut out = serde_json::to_value(p).unwrap_or_default();
     let host = host_of(p.base_url());
@@ -253,45 +376,74 @@ fn enrich(p: &Provider, catalog: &Value) -> Value {
     out["host"] = json!(host);
     out["ready"] = json!(p.key.is_empty() && local);
     out["agents"] = json!([]);
+    let cat_key = if !p.catalog.is_empty() {
+        &p.catalog
+    } else {
+        &p.id
+    };
     let names = catalog
-        .get(p.catalog.as_str())
+        .get(cat_key.as_str())
         .and_then(|c| c.get("models"))
         .and_then(Value::as_object);
+    // a provider with no stored list shows the catalog's, on by default
+    if out["models"].as_array().is_none_or(|m| m.is_empty())
+        && let Some(cat_models) = names
+    {
+        let seeded: Vec<Value> = cat_models
+            .iter()
+            .map(|(id, m)| {
+                json!({
+                    "id": id,
+                    "on": true,
+                    "name": m.get("name").and_then(Value::as_str).unwrap_or(id),
+                })
+            })
+            .collect();
+        out["models"] = json!(seeded);
+    }
     if let (Some(names), Some(models)) = (names, out["models"].as_array_mut()) {
         for m in models {
-            if let Some(id) = m["id"].as_str()
-                && m["name"].as_str().is_none()
-                && let Some(name) = names.get(id).and_then(|e| e["name"].as_str())
-            {
-                m["name"] = json!(name);
+            let Some(id) = m["id"].as_str() else { continue };
+            let Some(cat) = names.get(id) else { continue };
+            // the vendor's own name is the default; a stored name overrides it
+            if let Some(name) = cat["name"].as_str() {
+                m["default"] = json!(name);
+                if m["name"].as_str().is_none() {
+                    m["name"] = json!(name);
+                }
+            }
+            if let Some(limit) = cat.get("limit") {
+                m["context"] = limit.get("context").cloned().unwrap_or(Value::Null);
+                m["max"] = limit.get("output").cloned().unwrap_or(Value::Null);
+            }
+            let levels: Vec<&str> = cat
+                .get("reasoning_options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|o| o.get("type").and_then(Value::as_str) == Some("effort"))
+                .flat_map(|o| {
+                    o.get("values")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                })
+                .collect();
+            if !levels.is_empty() {
+                m["efforts"] = json!(levels);
             }
         }
     }
-    if out["models"].as_array().is_none_or(|m| m.is_empty()) {
-        let cat_key = if !p.catalog.is_empty() {
-            &p.catalog
-        } else {
-            &p.id
-        };
-        if let Some(cat_models) = catalog
-            .get(cat_key.as_str())
-            .and_then(|c| c.get("models"))
-            .and_then(Value::as_object)
-        {
-            let seeded: Vec<Value> = cat_models
-                .iter()
-                .map(|(id, m)| {
-                    json!({
-                        "id": id,
-                        "on": true,
-                        "name": m.get("name").and_then(Value::as_str).unwrap_or(id),
-                    })
-                })
-                .collect();
-            out["models"] = json!(seeded);
-        }
-    }
     out
+}
+
+/// A model's catalog entry, by id, with the vendor that has it.
+pub fn catalog_model<'a>(catalog: &'a Value, id: &str) -> Option<(&'a Value, &'a str)> {
+    catalog
+        .as_object()?
+        .iter()
+        .find_map(|(vendor, v)| Some((v.get("models")?.get(id)?, vendor.as_str())))
 }
 
 fn mask(key: &str) -> String {
@@ -356,10 +508,18 @@ fn preset_from(p: &Value) -> Option<Value> {
         .map(str::to_owned)
         .or_else(|| fallback_url(id).map(str::to_owned))
         .filter(|u| u.starts_with("http") && !u.contains("${"))?;
+    let host = reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_default();
     Some(json!({
         "id": id,
         "name": p["name"].as_str().unwrap_or(id),
-        "kind": "vendor",
+        "kind": if matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "0.0.0.0") {
+            "local"
+        } else {
+            "vendor"
+        },
         "chat": url,
         "catalog": id,
         // the UI renders "file:" icons from /api/icons/<id>, where the
@@ -390,6 +550,12 @@ pub struct Provider {
     pub responses: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub anthropic: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gemini: String,
+    /// when the vendor's own model list was last fetched, for the editor's
+    /// "vendor list" hint; the models.dev list stands in until then
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub catalog: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -453,6 +619,7 @@ enum Api {
     Chat,
     Responses,
     Anthropic,
+    Gemini,
 }
 
 impl Provider {
@@ -461,6 +628,7 @@ impl Provider {
             Api::Chat => &self.chat,
             Api::Responses => &self.responses,
             Api::Anthropic => &self.anthropic,
+            Api::Gemini => &self.gemini,
         }
     }
 
@@ -469,10 +637,22 @@ impl Provider {
         Some(self.url(api)).filter(|s| !s.is_empty())
     }
 
+    /// The URL the Gemini wire protocol is asked at: the provider's own, or
+    /// Google's, derived from its OpenAI-compatible spelling (…/v1beta/openai
+    /// drops the /openai).
+    fn gemini_url(&self) -> Option<&str> {
+        if !self.gemini.is_empty() {
+            return Some(&self.gemini);
+        }
+        self.chat
+            .contains("generativelanguage.googleapis.com")
+            .then(|| self.chat.strip_suffix("/openai").unwrap_or(&self.chat))
+    }
+
     /// The first URL the provider declares, in chat → responses → anthropic
-    /// order; the host shown in the list row is picked from it.
+    /// → gemini order; the host shown in the list row is picked from it.
     fn base_url(&self) -> &str {
-        [Api::Chat, Api::Responses, Api::Anthropic]
+        [Api::Chat, Api::Responses, Api::Anthropic, Api::Gemini]
             .into_iter()
             .find_map(|api| self.url_set(api))
             .unwrap_or("")
@@ -483,9 +663,20 @@ fn api_proto(p: &Provider) -> Api {
     match p.api.as_str() {
         "responses" => Api::Responses,
         "anthropic" => Api::Anthropic,
+        "gemini" | "google" => Api::Gemini,
         _ if !p.anthropic.is_empty() && p.chat.is_empty() => Api::Anthropic,
+        _ if !p.gemini.is_empty() && p.chat.is_empty() && p.responses.is_empty() => Api::Gemini,
         _ => Api::Chat,
     }
+}
+
+/// Everything after a `/v1` of its own: OpenAI's two dialects put the version
+/// in both the client's path and the base URL, so it is counted once. A path
+/// that merely starts with those letters (`/v1beta`) is left alone.
+fn after_v1(path: &str) -> &str {
+    path.strip_prefix("/v1/")
+        .or_else(|| (path == "/v1").then_some("/"))
+        .unwrap_or(path)
 }
 
 // ---------- the editor's endpoints ----------
@@ -522,6 +713,8 @@ struct SaveRequest {
     responses: Option<String>,
     #[serde(default)]
     anthropic: Option<String>,
+    #[serde(default)]
+    gemini: Option<String>,
     #[serde(default)]
     catalog: Option<String>,
     #[serde(default)]
@@ -573,6 +766,9 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     if let Some(v) = req.anthropic {
         rec.anthropic = v;
     }
+    if let Some(v) = req.gemini {
+        rec.gemini = v;
+    }
     if let Some(v) = req.catalog {
         rec.catalog = v;
     }
@@ -594,6 +790,35 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
     // presets, balance URLs, fallbacks, contexts — anything else the UI
     // carries lands in `extra`
     rec.extra.extend(req.rest);
+    // a preset's URLs come from the catalog, not the form: a preset asks
+    // only for a key
+    let preset_id = rec
+        .extra
+        .get("preset")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if !preset_id.is_empty()
+        && rec.chat.is_empty()
+        && rec.responses.is_empty()
+        && rec.anthropic.is_empty()
+    {
+        let url = {
+            let cat = app.catalog.lock().unwrap();
+            cat.get(&preset_id)
+                .and_then(|e| e["api"].as_str())
+                .map(str::to_owned)
+                .filter(|u| u.starts_with("http") && !u.contains("${"))
+                .or_else(|| fallback_url(&preset_id).map(str::to_owned))
+        };
+        if let Some(u) = url.as_deref().map(|u| u.trim_end_matches('/')) {
+            if u.contains("api.anthropic.com") {
+                rec.anthropic = u.to_owned();
+            } else {
+                rec.chat = u.to_owned();
+            }
+        }
+    }
     let had_models = req.models.as_ref().is_some_and(|m| !m.is_empty());
     if let Some(on) = req.models {
         rec.models = merge_models(&rec.models, &on);
@@ -679,7 +904,7 @@ pub async fn fetch_models_for_provider(app: &Arc<App>, id: &str) -> anyhow::Resu
     if base.is_empty() {
         anyhow::bail!("this provider has no URL to list models from");
     }
-    let mut req = app.client.get(&base).timeout(Duration::from_secs(5));
+    let mut req = app.client().get(&base).timeout(Duration::from_secs(5));
     if anthropic {
         if !key.is_empty() {
             req = req.header("x-api-key", &key);
@@ -716,9 +941,98 @@ pub async fn fetch_models_for_provider(app: &Arc<App>, id: &str) -> anyhow::Resu
     let mut cfg = app.config.lock().await;
     if let Some(p) = cfg.providers.iter_mut().find(|p| p.id == id) {
         p.models = merge_models(&p.models, &ids);
+        p.fetched = Some(stamp());
     }
     let _ = persist(&app.config_path, &cfg);
     Ok(count)
+}
+
+/// a short local "when", for the editor's fetched-list hint
+fn stamp() -> String {
+    jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string()
+}
+
+/// A model's display name, saved apart from the editor's Save: agents see it
+/// at once, and it changes nothing on the wire.
+pub async fn name(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let Some(id) = body["id"].as_str() else {
+        return err(StatusCode::BAD_REQUEST, "which provider?");
+    };
+    let Some(model) = body["model"].as_str() else {
+        return err(StatusCode::BAD_REQUEST, "which model?");
+    };
+    let display = body["modelName"].as_str().unwrap_or("").trim().to_owned();
+    let mut cfg = app.config.lock().await;
+    let Some(p) = cfg.providers.iter_mut().find(|p| p.id == id) else {
+        return err(StatusCode::NOT_FOUND, "no such provider");
+    };
+    if p.models.iter().all(|m| m.id != model) {
+        p.models.push(Model {
+            id: model.to_owned(),
+            on: true,
+            name: None,
+            extra: Map::new(),
+        });
+    }
+    let m = p.models.iter_mut().find(|m| m.id == model).unwrap();
+    m.name = (!display.is_empty()).then_some(display);
+    if let Some(res) = persisted(&app, &cfg) {
+        return res;
+    }
+    Json(payload(&app, &cfg)).into_response()
+}
+
+/// The reasoning levels agents are offered for a model; none stored means
+/// every level it has.
+pub async fn efforts(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let Some(id) = body["id"].as_str() else {
+        return err(StatusCode::BAD_REQUEST, "which provider?");
+    };
+    let Some(model) = body["model"].as_str() else {
+        return err(StatusCode::BAD_REQUEST, "which model?");
+    };
+    let kept: Vec<String> = body["efforts"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut cfg = app.config.lock().await;
+    let Some(p) = cfg.providers.iter_mut().find(|p| p.id == id) else {
+        return err(StatusCode::NOT_FOUND, "no such provider");
+    };
+    let Some(m) = p.models.iter_mut().find(|m| m.id == model) else {
+        return err(StatusCode::NOT_FOUND, "no such model");
+    };
+    if kept.is_empty() {
+        m.extra.remove("kept");
+    } else {
+        m.extra.insert("kept".to_owned(), json!(kept));
+    }
+    if let Some(res) = persisted(&app, &cfg) {
+        return res;
+    }
+    Json(payload(&app, &cfg)).into_response()
+}
+
+/// Drop the list fetched from the vendor: the models.dev one stands in until
+/// the next Refresh asks.
+pub async fn unfetch(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+    let Some(id) = body["id"].as_str() else {
+        return err(StatusCode::BAD_REQUEST, "which provider?");
+    };
+    let mut cfg = app.config.lock().await;
+    let Some(p) = cfg.providers.iter_mut().find(|p| p.id == id) else {
+        return err(StatusCode::NOT_FOUND, "no such provider");
+    };
+    p.fetched = None;
+    p.models.clear();
+    if let Some(res) = persisted(&app, &cfg) {
+        return res;
+    }
+    Json(payload(&app, &cfg)).into_response()
 }
 
 /// The vendor's own model list, stored as the provider's models.
@@ -771,7 +1085,7 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
                 None => out
                     .push(json!({ "protocol": name, "ok": false, "error": "no URL for this API" })),
                 Some(base) => {
-                    let mut r = tiny_request(&app.client, api, base, &p.key, &fallback).await;
+                    let mut r = tiny_request(&app.client(), api, base, &p.key, &fallback).await;
                     r["protocol"] = json!(name);
                     out.push(r);
                 }
@@ -788,7 +1102,7 @@ pub async fn test(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
         };
         let mut out = Vec::new();
         for model in &per_model {
-            out.push(tiny_request(&app.client, proto, base, &p.key, model).await);
+            out.push(tiny_request(&app.client(), proto, base, &p.key, model).await);
         }
         out
     };
@@ -863,11 +1177,20 @@ fn merge_models(existing: &[Model], on: &[String]) -> Vec<Model> {
 
 // ---------- where a pass-through request goes ----------
 
+/// How the vendor is told who is asking: a bearer key, Anthropic's header,
+/// or Google's.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Auth {
+    Bearer,
+    Anthropic,
+    Google,
+}
+
 pub struct Target {
     pub url: String,
     pub key: String,
     pub headers: Map<String, Value>,
-    pub anthropic: bool,
+    pub auth: Auth,
 }
 
 /// The request path decides the protocol. If a `provider_hint` is provided,
@@ -882,26 +1205,28 @@ pub fn route_for(
         Some((p, q)) => (p, Some(q)),
         None => (path_and_query, None),
     };
+    let gemini_path = path.contains(":generateContent")
+        || path.contains(":streamGenerateContent")
+        || path.contains(":countTokens")
+        || path.starts_with("/v1beta/");
     let (api, sub) = if path.starts_with("/v1/messages") || path.starts_with("/v1/complete") {
         (Api::Anthropic, path.to_owned())
+    } else if gemini_path {
+        (Api::Gemini, path.strip_prefix("/v1beta").unwrap_or(path).to_owned())
     } else if path.contains("/responses") {
-        (
-            Api::Responses,
-            path.strip_prefix("/v1").unwrap_or(path).to_owned(),
-        )
+        (Api::Responses, after_v1(path).to_owned())
     } else {
-        (
-            Api::Chat,
-            path.strip_prefix("/v1").unwrap_or(path).to_owned(),
-        )
+        (Api::Chat, after_v1(path).to_owned())
     };
     let sub = if sub.is_empty() { "/".to_owned() } else { sub };
 
     let to_target = |p: &Provider, allow_fallback: bool| -> Option<Target> {
-        let base = if allow_fallback {
-            p.url_set(api).unwrap_or_else(|| p.base_url())
-        } else {
-            p.url(api)
+        let base = match api {
+            // Gemini only goes to a provider that speaks it natively: some
+            // other protocol's URL would answer garbage, not an error
+            Api::Gemini => p.gemini_url()?,
+            _ if allow_fallback => p.url_set(api).unwrap_or_else(|| p.base_url()),
+            _ => p.url(api),
         }
         .trim_end_matches('/');
         if base.is_empty() {
@@ -916,7 +1241,11 @@ pub fn route_for(
             url,
             key: p.key.clone(),
             headers: p.headers.clone(),
-            anthropic: api == Api::Anthropic,
+            auth: match api {
+                Api::Anthropic => Auth::Anthropic,
+                Api::Gemini => Auth::Google,
+                _ => Auth::Bearer,
+            },
         })
     };
 

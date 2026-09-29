@@ -38,17 +38,28 @@ pub fn get_settings(app: &App, cfg: &ConfigState) -> Value {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
 
+    // what the proxy row says is live: where requests actually go now
+    let proxy = get_str("proxy", "");
+    let (proxy_now, proxy_source) = match proxy.as_str() {
+        "direct" => (String::new(), "off".to_owned()),
+        "" => std::env::var("HTTPS_PROXY")
+            .or_else(|_| std::env::var("https_proxy"))
+            .map(|u| (u, "environment".to_owned()))
+            .unwrap_or_else(|_| (String::new(), "none".to_owned())),
+        url => (url.to_owned(), "settings".to_owned()),
+    };
+
     json!({
         "theme": get_str("theme", "system"),
-        "lang": get_str("lang", "zh-CN"),
+        "lang": get_str("lang", "zh"),
         "tray": get_str("tray", "panel"),
         "dock": get_bool("dock", false),
         "dockWindow": get_bool("dockWindow", false),
         "login": get_bool("login", false),
         "quotaLeft": get_bool("quotaLeft", false),
-        "proxy": get_str("proxy", ""),
-        "proxyNow": "",
-        "proxySource": "none",
+        "proxy": proxy,
+        "proxyNow": proxy_now,
+        "proxySource": proxy_source,
         "codexWarmup": get_str("codexWarmup", "off"),
         "codexWarmed": Value::Null,
         "claudeWarmup": get_str("claudeWarmup", "off"),
@@ -84,6 +95,8 @@ pub async fn save(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Respo
                 cur.insert(k.clone(), v.clone());
             }
         }
+        // the proxy takes effect at once, not at the next launch
+        app.apply_proxy(cfg.settings.get("proxy").and_then(Value::as_str).unwrap_or(""));
         let _ = persist(&app.config_path, &cfg);
     }
     Json(get_settings(&app, &cfg)).into_response()
@@ -167,30 +180,12 @@ pub async fn usage(
         .parent()
         .map(|p| p.join("usage.json").to_string_lossy().into_owned())
         .unwrap_or_default();
-    Json(app.usage.summary(period, &path)).into_response()
+    let catalog = app.catalog.lock().unwrap();
+    Json(app.usage.summary(period, &path, &catalog)).into_response()
 }
 
 pub async fn usage_quotas() -> Response {
     Json(json!([])).into_response()
-}
-
-pub async fn sessions() -> Response {
-    Json(json!({
-        "sessions": [],
-        "terminal": "",
-        "dirs": [],
-    }))
-    .into_response()
-}
-
-pub async fn sessions_stats() -> Response {
-    Json(json!({
-        "from": "",
-        "to": "",
-        "days": [],
-        "agents": [],
-    }))
-    .into_response()
 }
 
 pub async fn davsync() -> Response {

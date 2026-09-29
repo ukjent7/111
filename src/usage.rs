@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::providers::catalog_model;
+
 /// usage lives in the first and last events of every known wire format, so a
 /// bounded head+tail copy of each answer is all the parsing ever needs
 const KEEP: usize = 512 * 1024;
@@ -86,8 +88,9 @@ impl Store {
     /// The Usage tab's answer: totals over the window, the per-bucket series
     /// and the per-model share, plus the hit rate. Only calls whose vendor
     /// reported caching take part in the rate — for a provider that never
-    /// reports it, a zero means nothing.
-    pub fn summary(&self, period: &str, path: &str) -> Value {
+    /// reports it, a zero means nothing. Cost is each model's list price
+    /// from the models.dev catalog, where it knows one.
+    pub fn summary(&self, period: &str, path: &str, catalog: &Value) -> Value {
         let records = self.records.lock().unwrap();
         let now = jiff::Zoned::now();
         let (start, bucket, days): (u64, &str, i64) = match period {
@@ -128,7 +131,7 @@ impl Store {
                 }
             }
         }
-        let mut series: Vec<(u64, u64, u64)> = vec![(0, 0, 0); labels.len()];
+        let mut series: Vec<(u64, u64, u64, f64, bool)> = vec![(0, 0, 0, 0.0, false); labels.len()];
         let index: HashMap<&str, usize> = labels
             .iter()
             .enumerate()
@@ -139,8 +142,12 @@ impl Store {
         let (mut input, mut output) = (0u64, 0u64);
         let (mut cache_read, mut cache_write, mut reasoning) = (0u64, 0u64, 0u64);
         let (mut hit_read, mut hit_prompt) = (0u64, 0u64);
-        let mut models: HashMap<String, (u64, u64, u64, u64, u64)> = HashMap::new();
+        let mut cost = 0.0f64;
+        let mut unpriced: std::collections::BTreeSet<String> = Default::default();
+        // model → (calls, errors, input, output, cache_read, cost, vendor icon)
+        let mut models: HashMap<String, (u64, u64, u64, u64, u64, f64, String)> = HashMap::new();
         for r in records.iter().filter(|r| r.time >= start) {
+            let price = price_of(catalog, &r.model);
             calls += 1;
             errors += u64::from(r.status >= 400);
             input += r.input;
@@ -148,11 +155,19 @@ impl Store {
             cache_read += r.cache_read;
             cache_write += r.cache_write;
             reasoning += r.reasoning;
+            if let Some(p) = &price {
+                cost += p.at(r.input, r.output, r.cache_read, r.cache_write);
+            } else if !r.model.is_empty() {
+                unpriced.insert(r.model.clone());
+            }
             if r.cache_read + r.cache_write > 0 {
                 hit_read += r.cache_read;
                 hit_prompt += r.input + r.cache_read + r.cache_write;
             }
             if !r.model.is_empty() {
+                let icon = price
+                    .as_ref()
+                    .map(|(_, vendor)| format!("file:{vendor}"));
                 let m = models.entry(r.model.clone()).or_default();
                 *m = (
                     m.0 + 1,
@@ -160,11 +175,23 @@ impl Store {
                     m.2 + r.input,
                     m.3 + r.output,
                     m.4 + r.cache_read,
+                    m.5 + price
+                        .as_ref()
+                        .map_or(0.0, |(p, _)| p.at(r.input, r.output, r.cache_read, r.cache_write)),
+                    icon.unwrap_or_else(|| m.6.clone()),
                 );
             }
             if let Some(slot) = index.get(label(r.time, bucket).as_str()) {
                 let b = &mut series[*slot];
-                *b = (b.0 + 1, b.1 + r.input, b.2 + r.output);
+                *b = (
+                    b.0 + 1,
+                    b.1 + r.input,
+                    b.2 + r.output,
+                    b.3 + price
+                        .as_ref()
+                        .map_or(0.0, |(p, _)| p.at(r.input, r.output, r.cache_read, r.cache_write)),
+                    b.4 || price.is_none(),
+                );
             }
         }
         let hit_rate =
@@ -172,8 +199,8 @@ impl Store {
 
         let mut rows: Vec<Value> = models
             .into_iter()
-            .map(|(name, (n, errs, i, o, cr))| {
-                json!({ "name": name, "icon": "generic", "calls": n, "errors": errs, "input": i, "output": o, "cache_read": cr })
+            .map(|(name, (n, errs, i, o, cr, c, icon))| {
+                json!({ "name": name, "icon": icon, "calls": n, "errors": errs, "input": i, "output": o, "cache_read": cr, "cost": c })
             })
             .collect();
         rows.sort_by(|a, b| {
@@ -193,16 +220,62 @@ impl Store {
             "cache_write": cache_write,
             "reasoning": reasoning,
             "errors": errors,
-            "cost": 0.0,
-            "unpriced": 0,
+            "cost": cost,
+            "unpriced": unpriced.len(),
             "hit_rate": hit_rate,
-            "series": series.iter().zip(labels).map(|((n, i, o), label)| json!({ "label": label, "calls": n, "input": i, "output": o })).collect::<Vec<_>>(),
+            "series": series.iter().zip(labels).map(|((n, i, o, c, unp), label)| json!({ "label": label, "calls": n, "input": i, "output": o, "cost": c, "unpriced": u64::from(*unp) })).collect::<Vec<_>>(),
             "bucket": bucket,
             "agents": [],
             "models": rows,
             "path": path,
         })
     }
+}
+
+/// A model's list price, per million tokens, as the models.dev catalog has it.
+#[derive(Clone, Copy)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+impl Price {
+    /// what one call's tokens cost at this price
+    pub fn at(self, input: u64, output: u64, cache_read: u64, cache_write: u64) -> f64 {
+        (input as f64 * self.input
+            + output as f64 * self.output
+            + cache_read as f64 * self.cache_read
+            + cache_write as f64 * self.cache_write)
+            / 1e6
+    }
+}
+
+/// A model's price and its vendor's id, found in the models.dev catalog. A
+/// record's model may carry a provider prefix ("openai/gpt-…"), so the bare
+/// id after the first slash tries too.
+pub fn price_of(catalog: &Value, model: &str) -> Option<(Price, String)> {
+    let bare = model.split_once('/').map(|(_, rest)| rest).unwrap_or(model);
+    let mut hit = None;
+    for key in [model, bare] {
+        if let Some((m, vendor)) = catalog_model(catalog, key) {
+            let cost = m.get("cost").and_then(Value::as_object);
+            let n = |k: &str| cost.and_then(|c| c.get(k)).and_then(Value::as_f64);
+            let (input, output) = (n("input"), n("output"));
+            if let (Some(input), Some(output)) = (input, output) {
+                let p = Price {
+                    input,
+                    output,
+                    cache_read: n("cache_read").unwrap_or(0.0),
+                    cache_write: n("cache_write").unwrap_or(0.0),
+                };
+                hit = Some((p, vendor.to_owned()));
+                break;
+            }
+        }
+    }
+    hit
 }
 
 /// local midnight `days_ago` days before `now`, as unix milliseconds

@@ -22,8 +22,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
+mod import;
 mod providers;
+mod sessions;
 mod settings;
+mod update;
 mod usage;
 
 // the prepared UI, embedded so the binary alone is the whole desktop app
@@ -52,7 +55,8 @@ pub struct ConfigState {
 pub type Logo = Option<(Vec<u8>, String)>;
 
 pub struct App {
-    pub client: reqwest::Client,
+    /// rebuilt when the proxy setting changes; `Client` clones are cheap
+    pub client: std::sync::RwLock<reqwest::Client>,
     pub config: tokio::sync::Mutex<ConfigState>,
     pub config_path: PathBuf,
     /// models.dev's vendor catalog, loaded from the disk cache at startup and
@@ -66,7 +70,42 @@ pub struct App {
     pub logos: Mutex<HashMap<String, Logo>>,
     /// every call's tokens, from the vendor usage reports in the answers
     pub usage: usage::Store,
+    /// the update check's state, and where a download stages the new binary
+    pub update: update::State,
+    pub update_path: PathBuf,
+    /// the agents' sessions, read from their files and kept for a few seconds
+    pub sessions: Mutex<Option<(Instant, Arc<Vec<sessions::Session>>)>>,
     pub gateway: Gateway,
+}
+
+impl App {
+    pub fn client(&self) -> reqwest::Client {
+        self.client.read().unwrap().clone()
+    }
+
+    /// The client again, after a proxy setting changed: "direct" pins no
+    /// proxy, a URL pins that one, empty follows the system's.
+    pub fn apply_proxy(&self, proxy: &str) {
+        *self.client.write().unwrap() = build_client(proxy);
+    }
+}
+
+fn build_client(proxy: &str) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(Duration::from_secs(15));
+    match proxy.trim() {
+        "direct" => builder = builder.no_proxy(),
+        url if !url.is_empty() => {
+            if let Ok(p) = reqwest::Proxy::all(url) {
+                builder = builder.proxy(p);
+            }
+        }
+        _ => {}
+    }
+    builder
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 fn main() -> Result<()> {
@@ -123,10 +162,12 @@ fn main() -> Result<()> {
         reqwest::Url::parse(&cfg.upstream).context("invalid --upstream URL")?;
     }
 
-    let client = reqwest::Client::builder()
-        .redirect(Policy::none())
-        .connect_timeout(Duration::from_secs(15))
-        .build()?;
+    let client = build_client(
+        cfg.settings
+            .get("proxy")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
     let role = if cfg.upstream.is_empty() {
         ", no provider configured yet".to_owned()
     } else {
@@ -141,8 +182,12 @@ fn main() -> Result<()> {
         tracing::warn!("failed to create logos dir: {e}");
     }
     let usage_path = config_path.with_file_name("usage.json");
+    let update_path = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("update.bin");
     let app = Arc::new(App {
-        client,
+        client: std::sync::RwLock::new(client),
         config: tokio::sync::Mutex::new(cfg),
         config_path,
         catalog: Mutex::new(load_catalog(&catalog_path)),
@@ -150,6 +195,9 @@ fn main() -> Result<()> {
         logos_dir,
         logos: Mutex::new(HashMap::new()),
         usage: usage::Store::load(usage_path),
+        update: update::State::default(),
+        update_path,
+        sessions: Mutex::new(None),
         gateway: Gateway {
             url: format!("http://{listen}"),
             requests: AtomicU64::new(0),
@@ -163,25 +211,40 @@ fn main() -> Result<()> {
         .route("/api/state", get(api_state))
         .route("/api/providers", get(providers::list))
         .route("/api/gateway/trace", get(api_trace))
-        .route("/api/update", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/api/update", get(update::status))
+        .route("/api/update/check", post(update::check_handler))
+        .route("/api/update/install", post(update::install))
         .route("/api/window/quit", post(quit))
+        .route(
+            "/api/window/{action}",
+            post(window_action).get(window_action),
+        )
         .route("/api/sync", post(providers::sync))
         .route("/api/icons/{id}", get(providers::icon))
+        .route("/api/icons", post(providers::upload_icon))
+        .route("/api/icons/favicon", post(providers::favicon))
         .route("/api/provider/save", post(providers::save))
         .route("/api/provider/delete", post(providers::delete))
         .route("/api/provider/key", post(providers::reveal_key))
         .route("/api/provider/models", post(providers::fetch_models))
         .route("/api/provider/test", post(providers::test))
+        .route("/api/provider/name", post(providers::name))
+        .route("/api/provider/efforts", post(providers::efforts))
+        .route("/api/provider/unfetch", post(providers::unfetch))
         .route("/api/settings", get(settings::get).post(settings::save))
         .route("/api/settings/quota-left", post(settings::set_quota_left))
         .route("/api/settings/login", post(settings::set_login))
         .route("/api/settings/lan", post(settings::set_lan))
         .route("/api/settings/reveal", post(settings::reveal))
         .route("/api/open", post(settings::open))
+        .route("/api/copy", post(copy))
         .route("/api/usage", get(settings::usage))
         .route("/api/usage/quotas", get(settings::usage_quotas))
-        .route("/api/sessions", get(settings::sessions))
-        .route("/api/sessions/stats", get(settings::sessions_stats))
+        .route("/api/sessions", get(sessions::list))
+        .route("/api/sessions/stats", get(sessions::stats))
+        .route("/api/sessions/terminal", post(sessions::terminal))
+        .route("/api/importapps", get(import::sources).post(import::run))
+        .route("/api/import/icon", post(providers::import_icon))
         .route("/api/davsync", get(settings::davsync))
         .route("/api/drift", get(settings::drift))
         .fallback(entry)
@@ -202,7 +265,7 @@ fn main() -> Result<()> {
         let app = app.clone();
         runtime.spawn(async move {
             loop {
-                match providers::fetch_catalog(&app.client).await {
+                match providers::fetch_catalog(&app.client()).await {
                     Ok(v) => {
                         providers::store_catalog(&app, v);
                         tracing::info!("models.dev catalog loaded");
@@ -216,7 +279,26 @@ fn main() -> Result<()> {
             }
         });
     }
-    let listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
+    {
+        // whether a newer magpie is out, so the Update pill knows even before
+        // anyone asks
+        let app = app.clone();
+        runtime.spawn(async move { update::background_check(&app).await });
+    }
+    let listener = runtime.block_on(async {
+        // a restart into an update may race the old listener's last moments
+        let mut bound = None;
+        for _ in 0..10 {
+            match tokio::net::TcpListener::bind(listen).await {
+                Ok(l) => {
+                    bound = Some(l);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+        bound.expect("no listener could be bound")
+    });
     let server = runtime.spawn(async move { axum::serve(listener, router).await });
     if window {
         run_window(&app.gateway.url);
@@ -417,18 +499,36 @@ async fn proxy(State(app): State<Arc<App>>, req: Request) -> Response {
             return (StatusCode::BAD_GATEWAY, msg.to_owned()).into_response();
         }
         Some(Dest::Legacy(base)) => format!("{}{}", base.trim_end_matches('/'), path),
-        Some(Dest::Provider(t)) => {
+        Some(Dest::Provider(mut t)) => {
             parts.headers.remove(header::AUTHORIZATION);
             parts.headers.remove("x-api-key");
-            if !t.key.is_empty()
-                && let Ok(v) = HeaderValue::from_str(&t.key)
-            {
-                if t.anthropic {
-                    parts
-                        .headers
-                        .insert(HeaderName::from_static("x-api-key"), v);
-                } else if let Ok(bearer) = HeaderValue::from_str(&format!("Bearer {}", t.key)) {
-                    parts.headers.insert(header::AUTHORIZATION, bearer);
+            parts.headers.remove("x-goog-api-key");
+            if !t.key.is_empty() {
+                // Google takes the key bare, in its own header; the others
+                // spell it as a bearer token
+                let (name, value) = match t.auth {
+                    providers::Auth::Anthropic => ("x-api-key", t.key.clone()),
+                    providers::Auth::Google => ("x-goog-api-key", t.key.clone()),
+                    providers::Auth::Bearer => ("authorization", format!("Bearer {}", t.key)),
+                };
+                if let (Ok(name), Ok(value)) = (
+                    HeaderName::from_static(name),
+                    HeaderValue::from_str(&value),
+                ) {
+                    parts.headers.insert(name, value);
+                }
+            }
+            if t.auth == providers::Auth::Google {
+                // Google accepts the key in the query string too: the
+                // client's own `key` must not survive beside magpie's
+                if let Ok(mut u) = reqwest::Url::parse(&t.url) {
+                    let kept: Vec<(String, String)> = u
+                        .query_pairs()
+                        .filter(|(k, _)| k != "key")
+                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                        .collect();
+                    u.query_pairs_mut().clear().extend_pairs(kept);
+                    t.url = u.to_string();
                 }
             }
             for (name, value) in &t.headers {
@@ -592,6 +692,30 @@ async fn api_trace(State(app): State<Arc<App>>, req: Request) -> impl IntoRespon
 /// the UI footer's Quit: end the whole app, window and gateway together
 async fn quit() -> Response {
     std::process::exit(0)
+}
+
+/// The window actions the panel and the web page ask for (show, hide, fit,
+/// tint). The desktop shell is the gateway's own webview and already owns
+/// its window, so these answer politely and change nothing — except tint,
+/// whose answer tells the page it painted over nothing.
+async fn window_action(axum::extract::Path(_action): axum::extract::Path<String>) -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        r#"{"ok":false}"#.to_owned(),
+    )
+        .into_response()
+}
+
+/// the page's Copy buttons: the webview refuses the page's own clipboard
+/// API, so magpie puts the text there
+async fn copy(Json(body): Json<Value>) -> Response {
+    let Some(text) = body["text"].as_str() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_owned())) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// Hop-by-hop headers describe one connection, never the message; anything the

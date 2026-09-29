@@ -82,6 +82,9 @@ jobs:
         run: |
           dir=target/release
           [ -f "$dir/magpie-gateway.exe" ] && bin=magpie-gateway.exe || bin=magpie-gateway
+          # the bare binary rides along as its own asset: the app's
+          # self-update downloads exactly this, no unpacking
+          cp "$dir/$bin" "${{ matrix.artifact }}.bin"
           if [ "${{ runner.os }}" = Windows ]; then
             powershell -Command "Compress-Archive -Path '$dir/$bin' -DestinationPath '${{ matrix.artifact }}.zip' -Force"
           else
@@ -93,6 +96,7 @@ jobs:
           path: |
             *.zip
             *.tar.gz
+            *.bin
 
   publish:
     needs: [version, build]
@@ -114,7 +118,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum *.zip *.tar.gz > SHA256SUMS
+          sha256sum *.zip *.tar.gz *.bin > SHA256SUMS
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}

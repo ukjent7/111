@@ -14,6 +14,7 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
+use base64::Engine;
 use futures::StreamExt;
 
 const SSE_EXPECTED: &[u8] = b"data: {\"chunk\":1}\n\ndata: {\"chunk\":2}\n\ndata: {\"id\":\"c\",\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":800},\"completion_tokens_details\":{\"reasoning_tokens\":60}}}\n\ndata: [DONE]\n\n";
@@ -56,11 +57,11 @@ impl Drop for Gateway {
 
 #[tokio::test]
 async fn gateway_passes_everything_through_losslessly() {
-    let run = tokio::time::timeout(Duration::from_secs(60), run_checks());
+    let run = tokio::time::timeout(Duration::from_secs(180), run_checks());
     let checks = match run.await {
         Ok(checks) => checks,
         Err(_) => vec![check(
-            "the whole suite finishes in 60s",
+            "the whole suite finishes in 180s",
             Err("timed out".into()),
         )],
     };
@@ -76,20 +77,47 @@ async fn run_checks() -> Vec<Check> {
     let gateway_addr = free_port();
     let config = std::env::temp_dir().join(format!("magpie-e2e-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&config);
-    let guard = spawn_gateway(gateway_addr, mock_addr, &config, true);
+    // a home of the suite's own, so the sessions scan and the import sources
+    // read what the suite planted there, not the runner's real ones
+    let home = std::env::temp_dir().join(format!("magpie-e2e-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    plant_sessions(&home);
+    plant_cc_switch(&home, &mock_addr.to_string());
+    let mock = mock_addr.to_string();
+    let guard = spawn_gateway(
+        gateway_addr,
+        mock_addr,
+        &config,
+        true,
+        &[
+            ("HOME", home.to_string_lossy().as_ref()),
+            (
+                "MAGPIE_UPDATE_URL",
+                format!("http://{mock}/release.json").as_str(),
+            ),
+        ],
+    );
     let gateway = format!("http://{gateway_addr}");
     let client = reqwest::Client::new();
 
     let mut checks = Vec::new();
-    checks.extend(sse_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
+    checks.extend(sse_scenario(&client, &gateway, &mock, &captured).await);
     checks.extend(binary_scenario(&client, &gateway).await);
-    checks.extend(status_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
+    checks.extend(status_scenario(&client, &gateway, &mock, &captured).await);
     checks.extend(ui_scenario(&client, &gateway).await);
-    checks.extend(usage_scenario(&client, &mock_addr.to_string()).await);
+    checks.extend(usage_scenario(&client, &mock).await);
     checks.extend(host_scenario(gateway_addr));
-    checks.extend(provider_scenario(&client, &gateway, &mock_addr.to_string(), &captured).await);
-    checks.extend(config_scenario(&config, &mock_addr.to_string()));
+    checks.extend(provider_scenario(&client, &gateway, &mock, &captured).await);
+    checks.extend(config_scenario(&config, &mock));
     checks.extend(no_provider_scenario(&client).await);
+    checks.extend(gemini_scenario(&client, &gateway, &mock, &captured).await);
+    checks.extend(editor_scenario(&client, &gateway, &mock).await);
+    checks.extend(icons_scenario(&client, &gateway, &mock).await);
+    checks.extend(import_scenario(&client, &gateway, &mock, &captured).await);
+    checks.extend(sessions_scenario(&client, &gateway).await);
+    checks.extend(wiring_scenario(&client, &gateway).await);
+    checks.extend(update_scenario(&client, &gateway, &config).await);
     drop(guard); // keep the child alive until every check ran
     checks
 }
@@ -454,7 +482,7 @@ async fn usage_scenario(client: &reqwest::Client, mock_addr: &str) -> Vec<Check>
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let config = dir.join("config.json");
-    let guard = spawn_gateway(addr, mock_addr.parse().unwrap(), &config, true);
+    let guard = spawn_gateway(addr, mock_addr.parse().unwrap(), &config, true, &[]);
     let gateway = format!("http://{addr}");
 
     // an OpenAI-style SSE answer: 1000 prompt with 800 cached → 200 in, 800
@@ -564,7 +592,7 @@ async fn no_provider_scenario(client: &reqwest::Client) -> Vec<Check> {
     let addr = free_port();
     let config = std::env::temp_dir().join(format!("magpie-e2e-empty-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&config);
-    let guard = spawn_gateway(addr, "0.0.0.0:1".parse().unwrap(), &config, false);
+    let guard = spawn_gateway(addr, "0.0.0.0:1".parse().unwrap(), &config, false, &[]);
     let res = client
         .get(format!("http://{addr}/v1/chat/completions"))
         .send()
@@ -863,6 +891,658 @@ async fn ui_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
     ]
 }
 
+/// the few bytes a PNG starts with — enough for the gateway's sniffing
+const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR";
+
+/// the release artifact this platform's update test names
+fn artifact_name() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => "magpie-gateway-windows-x64",
+        ("macos", "aarch64") => "magpie-gateway-macos-arm64",
+        ("macos", "x86_64") => "magpie-gateway-macos-x64",
+        ("linux", "x86_64") => "magpie-gateway-linux-x64",
+        _ => "magpie-gateway-unknown",
+    }
+}
+
+fn release_json(host: &str) -> Vec<u8> {
+    serde_json::json!({
+        "tag_name": "v99.0.0",
+        "html_url": "https://example.invalid/releases/v99.0.0",
+        "assets": [
+            { "name": artifact_name(), "browser_download_url": format!("http://{host}/asset.bin") },
+            { "name": "other.txt", "browser_download_url": format!("http://{host}/other") },
+        ],
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// the asset the update downloads: the gateway binary itself, so the swap
+/// test can restart into it and talk to it again
+fn asset_bytes() -> Vec<u8> {
+    static ASSET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    ASSET.get_or_init(|| std::fs::read(env!("CARGO_BIN_EXE_magpie-gateway")).unwrap())
+        .clone()
+}
+
+/// Claude Code's and Codex's session files, as the gateway's scanner reads
+/// them: one of each, with known token counts to assert against — stamped
+/// with today's date, so the sessions are always in the ranges the tests read
+fn plant_sessions(home: &Path) {
+    let now = jiff::Timestamp::now();
+    let ago = |secs: i64| (now - jiff::Span::new().seconds(secs)).to_string();
+    let day = jiff::Zoned::now().date();
+    let (y, m, d) = (day.year(), day.month(), day.day());
+
+    let dir = home.join(".claude/projects/proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("abc.jsonl"),
+        format!(
+            concat!(
+                r#"{{"type":"user","timestamp":"{ts1}","cwd":"/tmp/proj","message":{{"content":"Fix the login bug"}}}}"#, "\n",
+                r#"{{"type":"assistant","timestamp":"{ts2}","cwd":"/tmp/proj","message":{{"model":"claude-x","usage":{{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":30,"cache_creation_input_tokens":5}}}}}}"#, "\n",
+            ),
+            ts1 = ago(40),
+            ts2 = ago(20),
+        ),
+    )
+    .unwrap();
+    let dir = home.join(format!(".codex/sessions/{y}/{m:02}/{d:02}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("rollout-def.jsonl"),
+        format!(
+            concat!(
+                r#"{{"timestamp":"{ts1}","type":"session_meta","payload":{{"id":"sess-def","cwd":"/tmp/code"}}}}"#, "\n",
+                r#"{{"timestamp":"{ts2}","type":"turn_context","payload":{{"model":"gpt-x"}}}}"#, "\n",
+                r#"{{"timestamp":"{ts3}","type":"event_msg","payload":{{"type":"user_message","message":"write the parser"}}}}"#, "\n",
+                r#"{{"timestamp":"{ts4}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":200,"output_tokens":20,"cached_input_tokens":40}}}}}}}}"#, "\n",
+            ),
+            ts1 = ago(120),
+            ts2 = ago(115),
+            ts3 = ago(114),
+            ts4 = ago(110),
+        ),
+    )
+    .unwrap();
+}
+
+/// a CC Switch config with one provider, for the Import dialog
+fn plant_cc_switch(home: &Path, mock_addr: &str) {
+    let dir = home.join(".cc-switch");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.json"),
+        format!(
+            r#"{{"claude":{{"providers":{{"p1":{{"name":"Relay One","settingsConfig":{{"env":{{"ANTHROPIC_BASE_URL":"http://{mock_addr}/anthropic","ANTHROPIC_AUTH_TOKEN":"sk-cc-1234"}}}}}}}}}}}}"#
+        ),
+    )
+    .unwrap();
+}
+
+/// Gemini on the wire: the path decides the protocol, the key swaps into
+/// Google's header (or its query parameter), and the version prefix of the
+/// base URL and the path are counted once.
+async fn gemini_scenario(
+    client: &reqwest::Client,
+    gateway: &str,
+    mock_addr: &str,
+    captured: &Shared,
+) -> Vec<Check> {
+    let save = serde_json::json!({
+        "id": "gm", "new": true, "name": "Gemini Vendor",
+        "chat": format!("http://{mock_addr}/openai/v1"), "gemini": format!("http://{mock_addr}/v1beta"),
+        "key": "gm-key", "models": ["gemini-x"],
+    });
+    let saved = get_json_raw(
+        client
+            .post(format!("{gateway}/api/provider/save"))
+            .header("content-type", "application/json")
+            .body(save.to_string())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let body = r#"{"contents":[{"parts":[{"text":"hi"}]}]}"#;
+    client
+        .post(format!("{gateway}/v1beta/models/gemini-x:generateContent"))
+        .header("x-goog-api-key", "magpie")
+        .header("authorization", "Bearer magpie")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let by_header = captured.lock().unwrap().clone();
+
+    client
+        .post(format!(
+            "{gateway}/v1beta/models/gemini-x:generateContent?key=magpie"
+        ))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let by_query = captured.lock().unwrap().clone();
+
+    let _ = client
+        .post(format!("{gateway}/api/provider/delete"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"id": "gm"}).to_string())
+        .send()
+        .await
+        .unwrap();
+
+    vec![
+        check(
+            "a gemini provider is saved with its own endpoint",
+            (saved["providers"].as_array().map(|p| p.len()) == Some(1))
+                .then(|| "saved".into())
+                .ok_or_else(|| format!("saved: {saved}")),
+        ),
+        check(
+            "the gemini protocol routes to the provider's gemini URL with its key",
+            (by_header.method == "POST"
+                && by_header.path == "/v1beta/models/gemini-x:generateContent"
+                && by_header
+                    .headers
+                    .get("x-goog-api-key")
+                    .and_then(|v| v.to_str().ok())
+                    == Some("gm-key")
+                && !by_header.headers.contains_key("authorization"))
+            .then(|| format!("{} {} with x-goog-api-key", by_header.method, by_header.path))
+            .ok_or_else(|| format!("captured {by_header:#?}")),
+        ),
+        check(
+            "the key in the query string is the client's, and it does not survive",
+            (by_query.path == "/v1beta/models/gemini-x:generateContent"
+                && by_query.query.is_empty()
+                && by_query
+                    .headers
+                    .get("x-goog-api-key")
+                    .and_then(|v| v.to_str().ok())
+                    == Some("gm-key"))
+            .then(|| "query key stripped, header key swapped in".into())
+            .ok_or_else(|| format!("captured {by_query:#?}")),
+        ),
+    ]
+}
+
+/// The editor's quiet endpoints: a model's display name and reasoning levels
+/// are saved apart from Save, and a fetched vendor list can be dropped again.
+async fn editor_scenario(
+    client: &reqwest::Client,
+    gateway: &str,
+    mock_addr: &str,
+) -> Vec<Check> {
+    let save = serde_json::json!({
+        "id": "ed", "new": true, "name": "Editor Vendor",
+        "chat": format!("http://{mock_addr}/v1"), "key": "sk-ed", "models": ["alpha"],
+    });
+    let _ = client
+        .post(format!("{gateway}/api/provider/save"))
+        .header("content-type", "application/json")
+        .body(save.to_string())
+        .send()
+        .await
+        .unwrap();
+
+    let named = get_json_raw(
+        client
+            .post(format!("{gateway}/api/provider/name"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"id": "ed", "model": "alpha", "modelName": "Fancy Alpha"}).to_string())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let efforted = get_json_raw(
+        client
+            .post(format!("{gateway}/api/provider/efforts"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"id": "ed", "model": "alpha", "efforts": ["low", "high"]}).to_string())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let fetched = client
+        .post(format!("{gateway}/api/provider/models"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"id": "ed"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    let fetched = get_json_raw(fetched).await;
+    let listed = get_json_raw(
+        client
+            .get(format!("{gateway}/api/providers"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let unfetched = get_json_raw(
+        client
+            .post(format!("{gateway}/api/provider/unfetch"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"id": "ed"}).to_string())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let _ = client
+        .post(format!("{gateway}/api/provider/delete"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"id": "ed"}).to_string())
+        .send()
+        .await
+        .unwrap();
+
+    let model = |v: &serde_json::Value| {
+        v["providers"]
+            .as_array()
+            .and_then(|p| p.first())
+            .and_then(|p| p["models"].as_array())
+            .and_then(|m| m.first())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (named_m, kept_m, fetched_p) = (
+        model(&named),
+        model(&efforted),
+        listed["providers"].as_array().and_then(|p| p.first()).cloned().unwrap_or_default(),
+    );
+    vec![
+        check(
+            "a model's display name is saved at once",
+            (named_m["name"].as_str() == Some("Fancy Alpha"))
+                .then(|| "alpha is called Fancy Alpha".to_owned())
+                .ok_or_else(|| format!("model: {named_m}")),
+        ),
+        check(
+            "a model's reasoning levels are saved at once",
+            (kept_m["kept"] == serde_json::json!(["low", "high"]))
+                .then(|| "alpha keeps low and high".into())
+                .ok_or_else(|| format!("model: {kept_m}")),
+        ),
+        check(
+            "the fetched vendor list is marked as such",
+            (fetched["count"] == serde_json::json!(3) && fetched_p["fetched"].is_string())
+                .then(|| "the provider shows its fetched list".into())
+                .ok_or_else(|| format!("fetched {fetched}, listed {listed}")),
+        ),
+        check(
+            "forgetting the fetched list leaves the catalog's stand-in",
+            (unfetched["providers"][0]["fetched"].is_null()
+                && unfetched["providers"][0]["models"]
+                    .as_array()
+                    .is_none_or(|m| m.is_empty()))
+            .then(|| "fetched marker gone".into())
+            .ok_or_else(|| format!("unfetched: {unfetched}")),
+        ),
+    ]
+}
+
+/// A custom provider's own picture: uploaded, fetched from the site, or from
+/// a link — each served back from /api/icons.
+async fn icons_scenario(
+    client: &reqwest::Client,
+    gateway: &str,
+    mock_addr: &str,
+) -> Vec<Check> {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(PNG_BYTES);
+    let uploaded = get_json_raw(
+        client
+            .post(format!("{gateway}/api/icons"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "data": b64 }).to_string())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let from_site = get_json_raw(
+        client
+            .post(format!("{gateway}/api/icons/favicon"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "url": format!("http://{mock_addr}") }).to_string())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let from_link = get_json_raw(
+        client
+            .post(format!("{gateway}/api/import/icon"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "url": format!("http://{mock_addr}/import-icon.png") }).to_string())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let mut checks = Vec::new();
+    for (what, answer) in [
+        ("an uploaded picture", &uploaded),
+        ("the site's own icon", &from_site),
+        ("a picture from a link", &from_link),
+    ] {
+        let icon = answer["icon"].as_str().unwrap_or_default().to_owned();
+        let served = client
+            .get(format!(
+                "{gateway}/api/icons/{}",
+                icon.trim_start_matches("file:")
+            ))
+            .send()
+            .await
+            .unwrap();
+        checks.push(check(
+            &format!("{what} becomes an icon the page can show"),
+            (icon.starts_with("file:")
+                && served.status().is_success()
+                && served.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) == Some("image/png"))
+                .then(|| format!("{icon} served as image/png"))
+                .ok_or_else(|| format!("icon {icon:?}, status {}", served.status())),
+        ));
+    }
+    checks
+}
+
+/// Providers set up in CC Switch come over: listed with the key masked, and
+/// the imported one actually routes with the real key.
+async fn import_scenario(
+    client: &reqwest::Client,
+    gateway: &str,
+    mock_addr: &str,
+    captured: &Shared,
+) -> Vec<Check> {
+    let sources = get_json_raw(
+        client
+            .get(format!("{gateway}/api/importapps"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let run = get_json_raw(
+        client
+            .post(format!("{gateway}/api/importapps"))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::json!({ "picks": [{ "source": "cc-switch", "ref": "p1" }] })
+                    .to_string(),
+            )
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    client
+        .post(format!("{gateway}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(r#"{"model":"claude-x","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    let c = captured.lock().unwrap().clone();
+
+    // cleanup: the imported provider leaves again
+    let id = run["state"]["providers"]
+        .as_array()
+        .and_then(|p| p.first())
+        .and_then(|p| p["id"].as_str())
+        .unwrap_or("relay-one")
+        .to_owned();
+    let _ = client
+        .post(format!("{gateway}/api/provider/delete"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "id": id }).to_string())
+        .send()
+        .await
+        .unwrap();
+
+    let item = sources
+        .as_array()
+        .and_then(|s| s.first())
+        .cloned()
+        .unwrap_or_default();
+    vec![
+        check(
+            "CC Switch's providers are offered with their key masked",
+            (item["found"] == serde_json::json!(true)
+                && item["items"].as_array().map(|i| i.len()) == Some(1)
+                && item["items"][0]["provider"]["key"]
+                    .as_str()
+                    .is_some_and(|k| k.contains("…") && k != "sk-cc-1234"))
+            .then(|| "one provider, key masked".into())
+            .ok_or_else(|| format!("sources: {sources}")),
+        ),
+        check(
+            "an imported provider lands in the config",
+            (run["added"].as_array().map(|a| a.len()) == Some(1))
+                .then(|| format!("imported {:?}", run["added"]))
+                .ok_or_else(|| format!("run: {run}")),
+        ),
+        check(
+            "the imported provider routes with the real key",
+            (c.path == "/anthropic/v1/messages"
+                && c.headers.get("x-api-key").and_then(|v| v.to_str().ok())
+                    == Some("sk-cc-1234"))
+            .then(|| format!("{} {} with the imported key", c.method, c.path))
+            .ok_or_else(|| format!("captured {c:#?}")),
+        ),
+    ]
+}
+
+/// The sessions the agents wrote: listed with their tokens, summed per day,
+/// and priced against the catalog where it knows the model.
+async fn sessions_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
+    let list = get_json_raw(
+        client
+            .get(format!("{gateway}/api/sessions"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let stats = get_json_raw(
+        client
+            .get(format!("{gateway}/api/sessions/stats?days=30"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let sessions = list["sessions"].as_array().cloned().unwrap_or_default();
+    let claude = sessions.iter().find(|s| s["agent"] == "claude");
+    let codex = sessions.iter().find(|s| s["agent"] == "codex");
+    let days = stats["days"].as_array().cloned().unwrap_or_default();
+    let day_rows: Vec<&serde_json::Value> = days.iter().flat_map(|d| d["usage"].as_array().unwrap()).collect();
+    vec![
+        check(
+            "Claude Code's and Codex's sessions show up",
+            (claude.map(|s| s["id"].as_str() == Some("abc")).unwrap_or(false)
+                && codex.map(|s| s["id"].as_str() == Some("sess-def")).unwrap_or(false))
+            .then(|| "both agents' sessions listed".into())
+            .ok_or_else(|| format!("sessions: {list}")),
+        ),
+        check(
+            "a session's tokens come from its own file",
+            (claude.map(|s| {
+                s["input"] == serde_json::json!(100)
+                    && s["output"] == serde_json::json!(50)
+                    && s["cache_read"] == serde_json::json!(30)
+                    && s["cache_write"] == serde_json::json!(5)
+            })
+            .unwrap_or(false)
+                && codex
+                    .map(|s| s["input"] == serde_json::json!(200) && s["output"] == serde_json::json!(20))
+                    .unwrap_or(false))
+            .then(|| "claude 100/50 (+30/+5), codex 200/20".into())
+            .ok_or_else(|| format!("sessions: {list}")),
+        ),
+        check(
+            "a session carries the command that resumes it",
+            (claude.map(|s| s["resume"].as_str() == Some("claude --resume abc")).unwrap_or(false)
+                && codex.map(|s| s["resume"].as_str() == Some("codex resume sess-def")).unwrap_or(false))
+            .then(|| "resume commands along".into())
+            .ok_or_else(|| format!("sessions: {list}")),
+        ),
+        check(
+            "the range's totals are bucketed per day and agent",
+            (stats["agents"]["claude"].is_string()
+                && stats["agents"]["codex"].is_string()
+                && day_rows
+                    .iter()
+                    .filter(|r| r["agent"] == "claude" || r["agent"] == "codex")
+                    .count()
+                    >= 2)
+            .then(|| format!("{} day buckets, both agents present", days.len()))
+            .ok_or_else(|| format!("stats: {stats}")),
+        ),
+    ]
+}
+
+/// The shell's small plumbing: clipboard, window actions, update state.
+async fn wiring_scenario(client: &reqwest::Client, gateway: &str) -> Vec<Check> {
+    let copy = client
+        .post(format!("{gateway}/api/copy"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "text": "hi" }).to_string())
+        .send()
+        .await
+        .unwrap();
+    let window = client
+        .post(format!("{gateway}/api/window/main"))
+        .send()
+        .await
+        .unwrap();
+    let tint = client
+        .post(format!("{gateway}/api/window/tint?c=1,2,3&ms=0"))
+        .send()
+        .await
+        .unwrap();
+    let tint_body = tint.text().await.unwrap_or_default();
+    let update = get_json_raw(
+        client
+            .get(format!("{gateway}/api/update"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    vec![
+        check(
+            "the copy endpoint answers, clipboard or not",
+            (copy.status() == StatusCode::NO_CONTENT
+                || copy.status() == StatusCode::INTERNAL_SERVER_ERROR)
+                .then(|| format!("copy answered {}", copy.status()))
+                .ok_or_else(|| format!("copy answered {}", copy.status())),
+        ),
+        check(
+            "the window actions answer politely",
+            (window.status() == StatusCode::NO_CONTENT
+                && tint_body.contains("\"ok\""))
+            .then(|| "window actions are wired".into())
+            .ok_or_else(|| format!("window {}, tint {tint_body}", window.status())),
+        ),
+        check(
+            "the update state names this build",
+            (update["current"].is_string())
+                .then(|| format!("update state {:?}", update["state"]))
+                .ok_or_else(|| format!("update: {update}")),
+        ),
+    ]
+}
+
+/// The whole self-update round trip: a newer release is seen, its binary
+/// downloads, the swap restarts into it — and the restarted magpie answers.
+async fn update_scenario(client: &reqwest::Client, gateway: &str, config: &Path) -> Vec<Check> {
+    let checked = get_json_raw(
+        client
+            .post(format!("{gateway}/api/update/check"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let _ = client
+        .post(format!("{gateway}/api/update/install"))
+        .send()
+        .await
+        .unwrap();
+    let mut ready = serde_json::Value::Null;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        ready = get_json_raw(
+            client
+                .get(format!("{gateway}/api/update"))
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await;
+        if ready["state"] == "ready" || ready["state"] == "error" {
+            break;
+        }
+    }
+    // the swap: the gateway replaces its own binary and restarts into it
+    let _ = client
+        .post(format!("{gateway}/api/update/install"))
+        .send()
+        .await;
+    let mut back = serde_json::Value::Null;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        back = match client.get(format!("{gateway}/api/update")).send().await {
+            Ok(res) => get_json_raw(res).await,
+            Err(_) => serde_json::Value::Null, // mid-restart: try again
+        };
+        if back["current"].is_string() {
+            break;
+        }
+    }
+    // the restarted magpie owns the port now; the suite is done with it
+    let _ = client
+        .post(format!("{gateway}/api/window/quit"))
+        .send()
+        .await;
+    let _ = std::fs::remove_file(config);
+
+    vec![
+        check(
+            "a newer release is seen",
+            (checked["state"] == "available" && checked["latest"] == serde_json::json!("99.0.0"))
+                .then(|| format!("check: {} {}", checked["state"], checked["latest"]))
+                .ok_or_else(|| format!("check: {checked}")),
+        ),
+        check(
+            "the release's binary downloads",
+            (ready["state"] == "ready"
+                && ready["total"].as_u64().unwrap_or(0) > 0)
+            .then(|| format!("{} bytes staged", ready["total"]))
+            .ok_or_else(|| format!("download: {ready}")),
+        ),
+        check(
+            "the swap restarts into the new binary, which serves again",
+            (back["current"].as_str().map(str::to_owned)
+                == Some(env!("CARGO_PKG_VERSION").to_owned()))
+            .then(|| format!("restarted, still {}", back["current"]))
+            .ok_or_else(|| format!("after restart: {back}")),
+        ),
+    ]
+}
+
 async fn spawn_mock(captured: Shared) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -909,6 +1589,37 @@ async fn mock(State(captured): State<Shared>, req: Request) -> Response {
             .body(Body::from(
                 r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":500,"output_tokens":50,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}"#,
             ))
+            .unwrap(),
+        // a Gemini-style answer: usageMetadata counts, cached included in the prompt
+        p if p.contains(":generateContent") => Response::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"candidates":[],"usageMetadata":{"promptTokenCount":400,"candidatesTokenCount":40,"thoughtsTokenCount":10,"cachedContentTokenCount":100}}"#,
+            ))
+            .unwrap(),
+        "/favicon.ico" => Response::builder()
+            .header("content-type", "image/png")
+            .body(Body::from(PNG_BYTES.to_vec()))
+            .unwrap(),
+        "/import-icon.png" => Response::builder()
+            .header("content-type", "image/png")
+            .body(Body::from(PNG_BYTES.to_vec()))
+            .unwrap(),
+        "/release.json" => {
+            let host = parts
+                .headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("upstream.invalid")
+                .to_owned();
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(release_json(&host)))
+                .unwrap()
+        }
+        "/asset.bin" => Response::builder()
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(asset_bytes()))
             .unwrap(),
         "/echo" => Response::builder()
             .header("content-type", "application/octet-stream")
@@ -965,6 +1676,7 @@ fn spawn_gateway(
     mock: SocketAddr,
     config: &Path,
     with_provider: bool,
+    envs: &[(&str, &str)],
 ) -> Gateway {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_magpie-gateway"));
     cmd.arg("--listen").arg(gateway.to_string());
@@ -972,6 +1684,9 @@ fn spawn_gateway(
     cmd.arg("--no-window");
     if with_provider {
         cmd.arg("--upstream").arg(format!("http://{mock}"));
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
     }
     let mut child = cmd
         .stdout(Stdio::null())
